@@ -322,7 +322,6 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
-    aleatoric,
     bayesian,
     conformal,
     get_N_samples,
@@ -344,6 +343,8 @@ def _(
     set_sigma,
     set_zeta,
 ):
+    aleatoric = mo.ui.checkbox(False, label="Include aleatoric uncertainty")
+
     data_label = mo.md("**Dataset parameters**")
     N_samples = mo.ui.slider(50, 1000, 50, get_N_samples(), label='Samples $N$', on_change=set_N_samples)
     sigma = mo.ui.slider(0.001, 0.3, 0.005, get_sigma(), label=r'$\sigma$ noise', on_change=set_sigma)
@@ -355,9 +356,11 @@ def _(
     if reg_enabled:
         reg_label = mo.md("**Regression parameters**")
         P_elem = mo.ui.slider(5, 15, 1, get_P(), label="Fit parameters $P$", on_change=set_P)
+        aleatoric = mo.ui.checkbox(False, label="Include aleatoric uncertainty")
     else:
         reg_label = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>Regression parameters</p>")
-        P_elem = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 15, 1, get_P(), label='Fit parameters $P$', disabled=True, on_change=set_P)}</div>")
+        P_elem = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 15, 1, get_P(), label='Degree $P$', disabled=True, on_change=set_P)}</div>")
+        aleatoric = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label="Include aleatoric uncertainty", disabled=True)}</div>")
 
     # Conformal prediction section with conditional styling
     if conformal.value:
@@ -385,10 +388,10 @@ def _(
             mo.left(bayesian), 
             mo.left(conformal), 
             mo.left(pops), 
-            mo.left(aleatoric)
         ], gap=0.3),
 
-        mo.vstack([data_label, N_samples, sigma, seed, reg_label, P_elem]),
+        mo.vstack([data_label, N_samples, sigma, seed]),
+        mo.vstack([reg_label, P_elem, aleatoric]),
         mo.vstack([cp_label, calib_frac, zeta]),
         mo.vstack([pops_label, percentile_clipping, leverage_percentile])
     ], gap=0.5)
@@ -398,7 +401,7 @@ def _(
         {controls}
     </div>
     ''')
-    return N_samples, seed, sigma
+    return N_samples, aleatoric, seed, sigma
 
 
 @app.cell(hide_code=True)
@@ -406,8 +409,7 @@ def _(mo):
     bayesian = mo.ui.checkbox(False, label="Bayesian fit")
     conformal = mo.ui.checkbox(False, label="Conformal prediction")
     pops = mo.ui.checkbox(False, label="POPS regression")
-    aleatoric = mo.ui.checkbox(False, label="Aleatoric uncertainty")
-    return aleatoric, bayesian, conformal, pops
+    return bayesian, conformal, pops
 
 
 @app.cell(hide_code=True)
