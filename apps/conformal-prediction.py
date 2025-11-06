@@ -2,6 +2,7 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "marimo",
+#     "watchdog",
 #     "matplotlib==3.10.1",
 #     "numpy==2.2.5",
 #     "popsregression==0.3.4",
@@ -12,20 +13,20 @@
 
 import marimo
 
-__generated_with = "0.13.0"
+__generated_with = "0.17.6"
 app = marimo.App(width="medium")
 
 
 @app.cell
 def _():
     import marimo as mo
-    import os
     import numpy as np
     import matplotlib.pyplot as plt
 
     from sklearn.model_selection import train_test_split
     from sklearn.linear_model import BayesianRidge
     from sklearn.preprocessing import PolynomialFeatures
+    from POPSRegression import POPSRegression
 
     class RadialBasisFunctions:
         """
@@ -58,8 +59,6 @@ def _():
             Phi[i, :] = phi(X[i, :])
         return Phi    
 
-    from POPSRegression import POPSRegression
-
     # Customize default plotting style
     import seaborn as sns
     sns.set_context('talk')
@@ -85,20 +84,7 @@ def _(np):
 
 
 @app.cell
-def _(BayesianRidge, POPSRegression, g, np):
-    def get_data(N_samples=500, sigma=0.1):
-        x_train = np.append(np.random.uniform(-10, 10, size=N_samples), np.linspace(-10, 10, 2))
-        x_train = x_train[(x_train < 0) | (x_train > 5.0)]
-        x_train = np.sort(x_train)
-        y_train = g(x_train, noise_variance=sigma**2)
-        X_train = x_train[:, None]
-
-        x_test = np.linspace(-10, 10, 1000)
-        y_test = g(x_test, 0)
-        X_test = x_test[:, None]
-
-        return X_train, y_train, X_test, y_test
-
+def _(BayesianRidge, np):
     class MyBayesianRidge(BayesianRidge):
         def predict(self, X, return_std=False, aleatoric=False):
             y_pred = super().predict(X)
@@ -109,16 +95,44 @@ def _(BayesianRidge, POPSRegression, g, np):
                 y_var += 1.0 / self.alpha_
             return y_pred, np.sqrt(y_var)
 
+    class MyPOPSRegression(MyBayesianRidge):
+        def fit(self, X, y, prior=None, clipping=0.05, n_samples=100):
+            super().fit(X, y)       
+            num_observations, num_basis = X.shape
+            if prior is None:
+                prior = np.eye(num_basis)
+            H = prior.T @ prior + X.T @ X
+            dθ = np.zeros((num_observations, num_basis))
+            for i in range(num_observations):
+                V = np.linalg.solve(H, X[i, :])
+                leverage = X[i, :].T @ V
+                E        = X[i, :].T @ self.coef_
+                dy       = y[i] - E
+                dθ[i, :] = (dy / leverage) * V
+            self._dθ = dθ
 
-    class MyPOPSRegression(POPSRegression):
+            U, S, Vh = np.linalg.svd(self._dθ, full_matrices=False)
+            projected = self._dθ @ Vh.T
+            num_basis = projected.shape[1]
+            lower  = [np.quantile(projected[:, i], clipping) for i in range(num_basis) ]
+            upper  = [np.quantile(projected[:, i], 1.0 - clipping) for i in range(num_basis) ] 
+            bounds = np.c_[[lower, upper]].T
+
+            δθ = np.zeros((n_samples, num_basis))
+            for j in range(n_samples):
+                u = np.random.uniform(num_basis)
+                δθ[j, :] = (Vh @ (bounds[:, 0] + bounds[:, 1] * u)) + self.coef_
+            self._misspecification_sigma = δθ.T @ δθ / n_samples
+
         def predict(self, X, return_std=False, aleatoric=False):
-            res = super().predict(X, return_epistemic_std=return_std)
+            y_pred = super().predict(X)
             if return_std:
-                y_pred, y_std = res
+                y_std = ((X @ self._misspecification_sigma) * X).sum(axis=1)
                 if aleatoric:
                     y_std = np.sqrt(y_std**2 + 1.0 / self.alpha_)
-                res = (y_pred, y_std)
-            return res
+                return (y_pred, y_std)
+            else:
+                return y_pred        
 
     class ConformalPrediction(MyBayesianRidge):
         def get_scores(self, X, y, aleatoric=False):
@@ -141,24 +155,25 @@ def _(BayesianRidge, POPSRegression, g, np):
             if rescale:
                 y_std = y_std * self.qhat
             return y_pred, y_std
-
-    return ConformalPrediction, MyBayesianRidge, MyPOPSRegression, get_data
+    return ConformalPrediction, MyBayesianRidge
 
 
 @app.cell(hide_code=True)
 def _(
     ConformalPrediction,
     MyBayesianRidge,
-    MyPOPSRegression,
     N_samples,
     P,
+    POPSRegression,
     PolynomialFeatures,
     aleatoric,
     bayesian,
     calib_frac,
     conformal,
-    get_data,
+    g,
+    leverage_percentile,
     np,
+    percentile_clipping,
     plt,
     pops,
     seed,
@@ -166,6 +181,19 @@ def _(
     train_test_split,
     zeta,
 ):
+    def get_data(N_samples=500, sigma=0.1):
+        x_train = np.append(np.random.uniform(-10, 10, size=N_samples), np.linspace(-10, 10, 2))
+        x_train = x_train[(x_train < 0) | (x_train > 5.0)]
+        x_train = np.sort(x_train)
+        y_train = g(x_train, noise_variance=sigma**2)
+        X_train = x_train[:, None]
+
+        x_test = np.linspace(-10, 10, 1000)
+        y_test = g(x_test, 0)
+        X_test = x_test[:, None]
+
+        return X_train, y_train, X_test, y_test
+
     fig, ax = plt.subplots(figsize=(12, 6))
     np.random.seed(seed.value)
     X_data, y_data, X_test, y_test = get_data(N_samples.value, sigma=sigma.value)
@@ -179,12 +207,12 @@ def _(
     Phi_calib = poly.transform(X_calib)
 
     b = MyBayesianRidge(fit_intercept=False) 
-    p = MyPOPSRegression(resampling_method='sobol', fit_intercept=False)
+    p = POPSRegression(fit_intercept=False, percentile_clipping=percentile_clipping.value, leverage_percentile=leverage_percentile.value)
     c = ConformalPrediction(fit_intercept=False)
 
     ax.plot(X_test[:, 0], y_test, 'k-', label='Truth')
-    ax.plot(X_train[:, 0], y_train, 'b.', label='Train');
-    ax.plot(X_calib[:, 0], y_calib, 'c.', label='Calibration');
+    ax.plot(X_train[:, 0], y_train, 'b.', label='Train')
+    ax.plot(X_calib[:, 0], y_calib, 'c.', label='Calibration')
     ax.axvline(0.0, ls='--', color='k')
     ax.axvline(5.0, ls='--', color='k')
 
@@ -209,7 +237,12 @@ def _(
             qhat = model.calibrate(Phi_calib, y_calib, zeta=zeta.value, aleatoric=aleatoric.value)
             kwargs['rescale'] = True
 
-        y_pred, y_std = model.predict(Phi_test, **kwargs)
+        if label == 'POPS regression':
+            y_pred, y_std = model.predict(Phi_test, return_std=True)
+            if aleatoric.value:
+                y_std = np.sqrt(y_std**2 + 1.0 / model.alpha_)
+        else:
+            y_pred, y_std = model.predict(Phi_test, **kwargs)
         if label == 'Bayesian uncertainty':
             ax.plot(X_test[:, 0], y_pred, color=color, label='Mean Prediction', lw=3)
         ax.fill_between(X_test[:, 0], y_pred - y_std, y_pred + y_std, alpha=0.5, color=color, label=label)
@@ -236,16 +269,28 @@ def _(mo):
     conformal = mo.ui.checkbox(False, label="Conformal prediction")
     pops = mo.ui.checkbox(False, label="POPS regression")
     aleatoric = mo.ui.checkbox(False, label="Aleatoric uncertainty")
+
+    data_label = mo.md("**Dataset parameters**")
     N_samples = mo.ui.slider(50, 1000, 50, 500, label='Data samples $N$')
     sigma = mo.ui.slider(0.001, 0.3, 0.005, 0.1, label=r'$\sigma$ noise')
-    calib_frac = mo.ui.slider(0.05, 0.5, 0.05, 0.2, label="Calibration fraction")
-    P = mo.ui.slider(5, 15, 1, 10, label="Parameters $P$")
-    zeta = mo.ui.slider(0.05, 0.3, 0.05, label=r"Coverage $\zeta$")
     seed = mo.ui.slider(0, 10, label="Random seed")
+
+    reg_label = mo.md("**Regression parameters**")
+    P = mo.ui.slider(5, 15, 1, 10, label="Fit parameters $P$")
+
+    cp_label = mo.md("**Conformal prediction parameters**")
+    calib_frac = mo.ui.slider(0.05, 0.5, 0.05, 0.2, label="Calibration fraction")
+    zeta = mo.ui.slider(0.05, 0.3, 0.05, label=r"Coverage $\zeta$")
+
+    pops_label = mo.md("**POPS regression parameters**")
+    percentile_clipping = mo.ui.slider(0, 10, 1, 0, label="Percentile clipping")
+    leverage_percentile = mo.ui.slider(0, 99, 5, 50, label="Leverage percentile")
+
     mo.hstack([
-        mo.vstack([mo.left(bayesian), mo.left(conformal), mo.left(aleatoric)]),
-        mo.vstack([N_samples, sigma, calib_frac]),
-        mo.vstack([P, zeta, seed])
+        mo.vstack([mo.left(bayesian), mo.left(conformal), mo.left(pops), mo.left(aleatoric)]),
+        mo.vstack([data_label, N_samples, sigma, seed, reg_label, P]),
+        mo.vstack([cp_label, calib_frac, zeta]),
+        mo.vstack([pops_label, percentile_clipping, leverage_percentile])
     ])
     return (
         N_samples,
@@ -254,16 +299,13 @@ def _(mo):
         bayesian,
         calib_frac,
         conformal,
+        leverage_percentile,
+        percentile_clipping,
         pops,
         seed,
         sigma,
         zeta,
     )
-
-
-@app.cell
-def _():
-    return
 
 
 if __name__ == "__main__":
