@@ -14,7 +14,7 @@
 import marimo
 
 __generated_with = "0.17.6"
-app = marimo.App(width="medium")
+app = marimo.App(width="full")
 
 
 @app.cell
@@ -163,23 +163,26 @@ def _(
     ConformalPrediction,
     MyBayesianRidge,
     N_samples,
-    P,
     POPSRegression,
     PolynomialFeatures,
     aleatoric,
     bayesian,
-    calib_frac,
     conformal,
     g,
-    leverage_percentile,
+    get_N_samples,
+    get_P,
+    get_calib_frac,
+    get_leverage_percentile,
+    get_percentile_clipping,
+    get_seed,
+    get_sigma,
+    get_zeta,
     np,
-    percentile_clipping,
     plt,
     pops,
     seed,
     sigma,
     train_test_split,
-    zeta,
 ):
     def get_data(N_samples=500, sigma=0.1):
         x_train = np.append(np.random.uniform(-10, 10, size=N_samples), np.linspace(-10, 10, 2))
@@ -198,16 +201,16 @@ def _(
     np.random.seed(seed.value)
     X_data, y_data, X_test, y_test = get_data(N_samples.value, sigma=sigma.value)
 
-    X_train, X_calib, y_train, y_calib = train_test_split(X_data, y_data, test_size=calib_frac.value, random_state=seed.value)
+    X_train, X_calib, y_train, y_calib = train_test_split(X_data, y_data, test_size=get_calib_frac(), random_state=get_seed())
     n = len(y_calib)
 
-    poly = PolynomialFeatures(degree=P.value-1, include_bias=True)
+    poly = PolynomialFeatures(degree=get_P()-1, include_bias=True)
     Phi_train = poly.fit_transform(X_train)
     Phi_test = poly.transform(X_test)
     Phi_calib = poly.transform(X_calib)
 
     b = MyBayesianRidge(fit_intercept=False) 
-    p = POPSRegression(fit_intercept=False, percentile_clipping=percentile_clipping.value, leverage_percentile=leverage_percentile.value)
+    p = POPSRegression(fit_intercept=False, percentile_clipping=get_percentile_clipping(), leverage_percentile=get_leverage_percentile())
     c = ConformalPrediction(fit_intercept=False)
 
     ax.plot(X_test[:, 0], y_test, 'k-', label='Truth')
@@ -234,7 +237,7 @@ def _(
             'aleatoric': aleatoric.value,
         }        
         if label == 'Conformal prediction':
-            qhat = model.calibrate(Phi_calib, y_calib, zeta=zeta.value, aleatoric=aleatoric.value)
+            qhat = model.calibrate(Phi_calib, y_calib, zeta=get_zeta(), aleatoric=aleatoric.value)
             kwargs['rescale'] = True
 
         if label == 'POPS regression':
@@ -243,15 +246,14 @@ def _(
                 y_std = np.sqrt(y_std**2 + 1.0 / model.alpha_)
         else:
             y_pred, y_std = model.predict(Phi_test, **kwargs)
-        if label == 'Bayesian uncertainty':
-            ax.plot(X_test[:, 0], y_pred, color=color, label='Mean Prediction', lw=3)
+        ax.plot(X_test[:, 0], y_pred, color=color, lw=3)
         ax.fill_between(X_test[:, 0], y_pred - y_std, y_pred + y_std, alpha=0.5, color=color, label=label)
 
-    caption = fr'$N=${N_samples.value} data, $\sigma$={sigma.value:.2f} noise'
+    caption = fr'$N=${get_N_samples()} data, $\sigma$={get_sigma():.2f} noise'
     if bayesian.value or conformal.value:
-        caption += fr', $P=${P.value} params'
+        caption += fr', $P=${get_P()} params'
     if conformal.value:
-        caption += fr', $n=${n} calib,  $\zeta$={zeta.value:.2f},  $\hat{{q}}=${qhat:.1f}'
+        caption += fr', $n=${n} calib,  $\zeta$={get_zeta():.2f},  $\hat{{q}}=${qhat:.1f}'
     ax.set_title(caption)
     # print(caption)
     ax.set_xlim(-10, 10)
@@ -263,49 +265,117 @@ def _(
     return
 
 
+@app.cell
+def _(
+    aleatoric,
+    bayesian,
+    conformal,
+    get_N_samples,
+    get_P,
+    get_calib_frac,
+    get_leverage_percentile,
+    get_percentile_clipping,
+    get_seed,
+    get_sigma,
+    get_zeta,
+    mo,
+    pops,
+    set_N_samples,
+    set_P,
+    set_calib_frac,
+    set_leverage_percentile,
+    set_percentile_clipping,
+    set_seed,
+    set_sigma,
+    set_zeta,
+):
+    data_label = mo.md("**Dataset parameters**")
+    N_samples = mo.ui.slider(50, 1000, 50, get_N_samples(), label='Samples $N$', on_change=set_N_samples)
+    sigma = mo.ui.slider(0.001, 0.3, 0.005, get_sigma(), label=r'$\sigma$ noise', on_change=set_sigma)
+    seed = mo.ui.slider(0, 10, get_seed(), label="Random seed", on_change=set_seed)
+
+    # Regression parameters with conditional styling
+    reg_enabled = bayesian.value or conformal.value or pops.value
+
+    if reg_enabled:
+        reg_label = mo.md("**Regression parameters**")
+        P_elem = mo.ui.slider(5, 15, 1, get_P(), label="Fit parameters $P$", on_change=set_P)
+    else:
+        reg_label = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>Regression parameters</p>")
+        P_elem = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 15, 1, get_P(), label='Fit parameters $P$', disabled=True, on_change=set_P)}</div>")
+
+    # Conformal prediction section with conditional styling
+    if conformal.value:
+        cp_label = mo.md("**Conformal prediction parameters**")
+        calib_frac = mo.ui.slider(0.05, 0.5, 0.05, get_calib_frac(), label="Calibration fraction", on_change=set_calib_frac)
+        zeta = mo.ui.slider(0.05, 0.3, 0.05, get_zeta(), label=r"Coverage $\zeta$", on_change=set_zeta)
+    else:
+        cp_label = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>Conformal prediction parameters</p>")
+        calib_frac = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.05, 0.5, 0.05, get_calib_frac(), label='Calibration fraction', disabled=True, on_change=set_calib_frac)}</div>")
+        zeta = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.05, 0.3, 0.05, get_zeta(), label=r'Coverage $\zeta$', disabled=True, on_change=set_zeta)}</div>")
+
+    # POPS regression section with conditional styling
+    if pops.value:
+        pops_label = mo.md("**POPS regression parameters**")
+        percentile_clipping = mo.ui.slider(0, 10, 1, get_percentile_clipping(), label="Percentile clipping", on_change=set_percentile_clipping)
+        leverage_percentile = mo.ui.slider(0, 99, 5, get_leverage_percentile(), label="Leverage percentile", on_change=set_leverage_percentile)
+    else:
+        pops_label = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>POPS regression parameters</p>")
+        percentile_clipping = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0, 10, 1, get_percentile_clipping(), label='Percentile clipping', disabled=True, on_change=set_percentile_clipping)}</div>")
+        leverage_percentile = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0, 99, 5, get_leverage_percentile(), label='Leverage percentile', disabled=True, on_change=set_leverage_percentile)}</div>")
+
+    mo.hstack([
+        mo.vstack([mo.left(bayesian), mo.left(conformal), mo.left(pops), mo.left(aleatoric)]),
+        mo.vstack([data_label, N_samples, sigma, seed, reg_label, P_elem]),
+        mo.vstack([cp_label, calib_frac, zeta]),
+        mo.vstack([pops_label, percentile_clipping, leverage_percentile])
+    ])
+    return N_samples, seed, sigma
+
+
 @app.cell(hide_code=True)
 def _(mo):
     bayesian = mo.ui.checkbox(False, label="Bayesian fit")
     conformal = mo.ui.checkbox(False, label="Conformal prediction")
     pops = mo.ui.checkbox(False, label="POPS regression")
     aleatoric = mo.ui.checkbox(False, label="Aleatoric uncertainty")
+    return aleatoric, bayesian, conformal, pops
 
-    data_label = mo.md("**Dataset parameters**")
-    N_samples = mo.ui.slider(50, 1000, 50, 500, label='Data samples $N$')
-    sigma = mo.ui.slider(0.001, 0.3, 0.005, 0.1, label=r'$\sigma$ noise')
-    seed = mo.ui.slider(0, 10, label="Random seed")
 
-    reg_label = mo.md("**Regression parameters**")
-    P = mo.ui.slider(5, 15, 1, 10, label="Fit parameters $P$")
-
-    cp_label = mo.md("**Conformal prediction parameters**")
-    calib_frac = mo.ui.slider(0.05, 0.5, 0.05, 0.2, label="Calibration fraction")
-    zeta = mo.ui.slider(0.05, 0.3, 0.05, label=r"Coverage $\zeta$")
-
-    pops_label = mo.md("**POPS regression parameters**")
-    percentile_clipping = mo.ui.slider(0, 10, 1, 0, label="Percentile clipping")
-    leverage_percentile = mo.ui.slider(0, 99, 5, 50, label="Leverage percentile")
-
-    mo.hstack([
-        mo.vstack([mo.left(bayesian), mo.left(conformal), mo.left(pops), mo.left(aleatoric)]),
-        mo.vstack([data_label, N_samples, sigma, seed, reg_label, P]),
-        mo.vstack([cp_label, calib_frac, zeta]),
-        mo.vstack([pops_label, percentile_clipping, leverage_percentile])
-    ])
+@app.cell
+def _(mo):
+    # Use marimo state to preserve all slider values
+    get_N_samples, set_N_samples = mo.state(500)
+    get_sigma, set_sigma = mo.state(0.1)
+    get_seed, set_seed = mo.state(0)
+    get_P, set_P = mo.state(10)
+    get_calib_frac, set_calib_frac = mo.state(0.2)
+    get_zeta, set_zeta = mo.state(0.05)
+    get_percentile_clipping, set_percentile_clipping = mo.state(0)
+    get_leverage_percentile, set_leverage_percentile = mo.state(50)
     return (
-        N_samples,
-        P,
-        aleatoric,
-        bayesian,
-        calib_frac,
-        conformal,
-        leverage_percentile,
-        percentile_clipping,
-        pops,
-        seed,
-        sigma,
-        zeta,
+        get_N_samples,
+        get_P,
+        get_calib_frac,
+        get_leverage_percentile,
+        get_percentile_clipping,
+        get_seed,
+        get_sigma,
+        get_zeta,
+        set_N_samples,
+        set_P,
+        set_calib_frac,
+        set_leverage_percentile,
+        set_percentile_clipping,
+        set_seed,
+        set_sigma,
+        set_zeta,
     )
+
+
+@app.cell
+def _():
+    return
 
 
 if __name__ == "__main__":
