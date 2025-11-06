@@ -348,7 +348,7 @@ def _(
     data_label = mo.md("**Dataset parameters**")
     N_samples = mo.ui.slider(50, 1000, 50, get_N_samples(), label='Samples $N$', on_change=set_N_samples)
     sigma = mo.ui.slider(0.001, 0.3, 0.005, get_sigma(), label=r'$\sigma$ noise', on_change=set_sigma)
-    seed = mo.ui.slider(0, 10, get_seed(), label="Random seed", on_change=set_seed)
+    seed = mo.ui.slider(0, 10, 1, get_seed(), label="Seed", on_change=set_seed)
 
     # Regression parameters with conditional styling
     reg_enabled = bayesian.value or conformal.value or pops.value
@@ -441,6 +441,11 @@ def _(mo):
         set_sigma,
         set_zeta,
     )
+
+
+@app.cell
+def _():
+    return
 
 
 if __name__ == "__main__":
