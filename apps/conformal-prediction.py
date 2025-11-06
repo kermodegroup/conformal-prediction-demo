@@ -8,6 +8,7 @@
 #     "popsregression==0.3.4",
 #     "scikit-learn==1.6.1",
 #     "seaborn==0.13.2",
+#     "qrcode==8.2",
 # ]
 # ///
 
@@ -15,6 +16,19 @@ import marimo
 
 __generated_with = "0.17.6"
 app = marimo.App(width="full")
+
+
+@app.cell
+def _(mo):
+    mo.Html('''
+    <style>
+        body, .marimo-container {
+            margin-top: 0 !important;
+            padding-top: 0 !important;
+        }
+    </style>
+    ''')
+    return
 
 
 @app.cell
@@ -158,6 +172,45 @@ def _(BayesianRidge, np):
     return ConformalPrediction, MyBayesianRidge
 
 
+@app.cell
+def _():
+    import qrcode
+    import io
+    import base64
+
+    # Generate QR code
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data('https://tinyurl.com/conf-pred-demo')
+    qr.make(fit=True)
+
+    img = qr.make_image(fill_color="black", back_color="white")
+
+    # Convert to base64
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG')
+    buffer.seek(0)
+    qr_base64 = base64.b64encode(buffer.read()).decode()
+    return (qr_base64,)
+
+
+@app.cell
+def _(mo, qr_base64):
+    mo.Html(f'''
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0; padding-top: 0;">
+        <div>
+            <p style='font-size: 24px; margin: 0; padding: 0;'><b>Conformal Prediction and POPS Regression Demo</b>
+            <br><i>Live demo:</i>
+            <a href="https://tinyurl.com/conf-pred-demo" target="_blank" style="color: #0066cc; text-decoration: none;">tinyurl.com/conf-pred-demo</a>
+            <br><i>Code:</i>
+            <a href="https://github.com/kermodegroup/conformal-prediction-demo" target="_blank" style="color: #0066cc; text-decoration: none;">github.com/kermodegroup/conformal-prediction-demo</a>
+            </p>
+        </div>
+        <img src="data:image/png;base64,{qr_base64}" alt="QR Code" style="width: 150px; height: 150px; flex-shrink: 0;" />
+    </div>
+    ''')
+    return
+
+
 @app.cell(hide_code=True)
 def _(
     ConformalPrediction,
@@ -177,6 +230,7 @@ def _(
     get_seed,
     get_sigma,
     get_zeta,
+    mo,
     np,
     plt,
     pops,
@@ -197,7 +251,7 @@ def _(
 
         return X_train, y_train, X_test, y_test
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(14, 5))
     np.random.seed(seed.value)
     X_data, y_data, X_test, y_test = get_data(N_samples.value, sigma=sigma.value)
 
@@ -261,11 +315,12 @@ def _(
     ax.set_xlabel('$x$')
     ax.set_ylabel('$y$')
     ax.legend(loc='lower left')
-    fig
+    plt.tight_layout()
+    mo.center(fig)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     aleatoric,
     bayesian,
@@ -324,12 +379,25 @@ def _(
         percentile_clipping = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0, 10, 1, get_percentile_clipping(), label='Percentile clipping', disabled=True, on_change=set_percentile_clipping)}</div>")
         leverage_percentile = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0, 99, 5, get_leverage_percentile(), label='Leverage percentile', disabled=True, on_change=set_leverage_percentile)}</div>")
 
-    mo.hstack([
-        mo.vstack([mo.left(bayesian), mo.left(conformal), mo.left(pops), mo.left(aleatoric)]),
+    controls = mo.hstack([
+        mo.vstack([
+            mo.md("**Analysis Methods**"),
+            mo.left(bayesian), 
+            mo.left(conformal), 
+            mo.left(pops), 
+            mo.left(aleatoric)
+        ], gap=0.3),
+
         mo.vstack([data_label, N_samples, sigma, seed, reg_label, P_elem]),
         mo.vstack([cp_label, calib_frac, zeta]),
         mo.vstack([pops_label, percentile_clipping, leverage_percentile])
-    ])
+    ], gap=0.5)
+
+    mo.Html(f'''
+    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
+        {controls}
+    </div>
+    ''')
     return N_samples, seed, sigma
 
 
@@ -342,7 +410,7 @@ def _(mo):
     return aleatoric, bayesian, conformal, pops
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     # Use marimo state to preserve all slider values
     get_N_samples, set_N_samples = mo.state(500)
@@ -371,11 +439,6 @@ def _(mo):
         set_sigma,
         set_zeta,
     )
-
-
-@app.cell
-def _():
-    return
 
 
 if __name__ == "__main__":
