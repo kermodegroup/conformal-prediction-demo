@@ -320,7 +320,7 @@ def _(
     ax.legend(loc='lower left')
     plt.tight_layout()
     mo.center(fig)
-    return Phi_test, model
+    return
 
 
 @app.cell(hide_code=True)
@@ -444,17 +444,6 @@ def _(mo):
         set_sigma,
         set_zeta,
     )
-
-
-@app.cell
-def _(Phi_test, model):
-    model.predict(Phi_test, return_std=True, return_bounds=True)
-    return
-
-
-@app.cell
-def _():
-    return
 
 
 if __name__ == "__main__":
