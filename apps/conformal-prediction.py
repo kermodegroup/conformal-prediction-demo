@@ -14,7 +14,7 @@
 
 import marimo
 
-__generated_with = "0.17.6"
+__generated_with = "0.17.7"
 app = marimo.App(width="full")
 
 
@@ -295,13 +295,16 @@ def _(
             kwargs['rescale'] = True
 
         if label == 'POPS regression':
-            y_pred, y_std = model.predict(Phi_test, return_std=True)
+            y_pred, y_std, y_min, y_max = model.predict(Phi_test, return_std=True, return_bounds=True)
             if aleatoric.value:
                 y_std = np.sqrt(y_std**2 + 1.0 / model.alpha_)
         else:
             y_pred, y_std = model.predict(Phi_test, **kwargs)
         ax.plot(X_test[:, 0], y_pred, color=color, lw=3)
         ax.fill_between(X_test[:, 0], y_pred - y_std, y_pred + y_std, alpha=0.5, color=color, label=label)
+        if label == 'POPS regression':
+            ax.plot(X_test[:, 0], y_min, 'k--', lw=1, label='POPS min/max')
+            ax.plot(X_test[:, 0], y_max, 'k--', lw=1)
 
     caption = fr'$N=${get_N_samples()} data, $\sigma$={get_sigma():.2f} noise'
     if bayesian.value or conformal.value:
@@ -317,7 +320,7 @@ def _(
     ax.legend(loc='lower left')
     plt.tight_layout()
     mo.center(fig)
-    return
+    return Phi_test, model
 
 
 @app.cell(hide_code=True)
@@ -441,6 +444,12 @@ def _(mo):
         set_sigma,
         set_zeta,
     )
+
+
+@app.cell
+def _(Phi_test, model):
+    model.predict(Phi_test, return_std=True, return_bounds=True)
+    return
 
 
 @app.cell
