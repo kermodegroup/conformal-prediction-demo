@@ -1216,7 +1216,11 @@ def _(
             gp_mean_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 1, 0.1, _log_reg, label='Mean regularization (log₁₀)', disabled=True)}</div>")
 
         gp_lengthscale = gp_lengthscale_slider  # For display
-        gp_support_radius = gp_support_radius_slider  # For display
+        # Conditionally enable/disable support radius based on kernel type
+        if _kernel_type == 'bump':
+            gp_support_radius = gp_support_radius_slider  # Active when bump kernel
+        else:
+            gp_support_radius = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{gp_support_radius_slider}</div>")
         gp_opt_button_elem = gp_optimize_button
         # Show gp_use_poly_mean checkbox normally when GP regression is enabled
         gp_use_poly_mean_elem = gp_use_poly_mean
@@ -1236,18 +1240,15 @@ def _(
         gp_opt_button_elem = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.button(label='Optimize hyperparameters', disabled=True)}</div>")
 
     controls = mo.hstack([
+        mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed]),    
         mo.vstack([
             mo.md("**Analysis Methods**"),
             mo.left(bayesian),
             mo.left(conformal),
             mo.left(pops),
             mo.left(gp_regression),
-        ], gap=0.3),
-
-        mo.vstack([data_label, function_dropdown, N_samples, sigma, seed, filter_range]),
-        mo.vstack([reg_label, P_elem, aleatoric]),
-        mo.vstack([cp_label, calib_frac, zeta]),
-        mo.vstack([pops_label, percentile_clipping]),
+        ]),
+        mo.vstack([reg_label, P_elem, aleatoric, cp_label, calib_frac, zeta, pops_label, percentile_clipping]),
         mo.vstack([gp_label, gp_kernel_dropdown, gp_lengthscale, gp_support_radius, gp_use_poly_mean_elem, gp_poly_mean_degree, gp_joint_inference, gp_mean_regularization, gp_opt_button_elem])
     ], gap=0.5)
 
