@@ -138,6 +138,101 @@ def _(BayesianRidge, np):
 
 
 @app.cell
+def _(np):
+    from sklearn.neural_network import MLPRegressor
+
+    class NeuralNetworkRegression:
+        """
+        Ensemble of MLPRegressors for uncertainty quantification
+
+        Uses sklearn's MLPRegressor with ensemble for uncertainty estimation
+        """
+        def __init__(self, hidden_layer_sizes=(20,), alpha=0.001, n_ensemble=5, max_iter=500):
+            """
+            Parameters:
+            -----------
+            hidden_layer_sizes : tuple, default=(20,)
+                Number of neurons in each hidden layer, e.g., (20,) or (20, 10)
+            alpha : float, default=0.001
+                L2 regularization strength
+            n_ensemble : int, default=5
+                Number of networks in ensemble for uncertainty estimation
+            max_iter : int, default=500
+                Maximum number of iterations for LBFGS solver
+            """
+            self.hidden_layer_sizes = hidden_layer_sizes
+            self.alpha = alpha
+            self.n_ensemble = n_ensemble
+            self.max_iter = max_iter
+            self.ensemble_ = []
+            self.x_mean_ = None
+            self.x_std_ = None
+
+        def fit(self, X, y):
+            """Fit ensemble of neural networks with different random initializations"""
+            # Standardize inputs for better NN training
+            self.x_mean_ = np.mean(X, axis=0, keepdims=True)
+            self.x_std_ = np.std(X, axis=0, keepdims=True) + 1e-8  # Avoid division by zero
+            X_scaled = (X - self.x_mean_) / self.x_std_
+
+            # Train ensemble with different random seeds
+            self.ensemble_ = []
+            for i in range(self.n_ensemble):
+                model = MLPRegressor(
+                    hidden_layer_sizes=self.hidden_layer_sizes,
+                    activation='tanh',
+                    solver='lbfgs',
+                    alpha=self.alpha,
+                    max_iter=self.max_iter,
+                    random_state=i,  # Different seed for each ensemble member
+                    warm_start=False
+                )
+                model.fit(X_scaled, y)
+                self.ensemble_.append(model)
+
+            return self
+
+        def predict(self, X, return_std=False, aleatoric=False):
+            """
+            Predict using ensemble
+
+            Parameters:
+            -----------
+            X : array-like
+                Input data
+            return_std : bool, default=False
+                If True, return (predictions, std_dev)
+            aleatoric : bool, default=False
+                If True, add noise variance to uncertainty (not implemented for NN)
+
+            Returns:
+            --------
+            y_pred : array
+                Mean predictions across ensemble
+            y_std : array (if return_std=True)
+                Standard deviation across ensemble
+            """
+            # Standardize inputs using training statistics
+            X_scaled = (X - self.x_mean_) / self.x_std_
+
+            # Get predictions from all ensemble members
+            predictions = np.array([model.predict(X_scaled) for model in self.ensemble_])
+
+            # Compute mean and std across ensemble
+            y_pred = np.mean(predictions, axis=0)
+
+            if return_std:
+                y_std = np.std(predictions, axis=0)
+                # Note: aleatoric uncertainty not implemented for NN ensemble
+                # The ensemble variance already captures both epistemic and some aleatoric uncertainty
+                return y_pred, y_std
+            else:
+                return y_pred
+
+    return (NeuralNetworkRegression,)
+
+
+@app.cell
 def _(cho_factor, cho_solve, np):
     # Pure numpy/scipy GP implementation for WebAssembly compatibility
 
@@ -739,6 +834,7 @@ def _(
     ConformalPrediction,
     MyBayesianRidge,
     N_samples,
+    NeuralNetworkRegression,
     POPSRegression,
     PolynomialFeatures,
     aleatoric,
@@ -760,6 +856,10 @@ def _(
     get_gp_mean_regularization,
     get_gp_poly_mean_degree,
     get_gp_support_radius,
+    get_nn_ensemble_size,
+    get_nn_hidden_units,
+    get_nn_num_layers,
+    get_nn_regularization,
     get_percentile_clipping,
     get_seed,
     get_sigma,
@@ -768,6 +868,7 @@ def _(
     gp_regression,
     gp_use_poly_mean,
     mo,
+    neural_network,
     np,
     plt,
     polynomial_kernel,
@@ -828,6 +929,8 @@ def _(
         models_to_plot.append((p, Phi_train, Phi_test, 'C0', 'POPS regression', True))
     if gp_regression.value:
         models_to_plot.append((None, X_train, X_test, 'C3', 'GP regression', False))
+    if neural_network.value:
+        models_to_plot.append((None, X_train, X_test, 'C5', 'Neural network', False))
 
     for model_info in models_to_plot:
         if len(model_info) == 6:
@@ -881,6 +984,24 @@ def _(
             if aleatoric.value:
                 # Add aleatoric noise to GP predictions
                 y_std = np.sqrt(y_std**2 + sigma.value**2)
+        elif label == 'Neural network':
+            # Fit neural network ensemble
+            # Build hidden layer architecture
+            num_layers = get_nn_num_layers()
+            hidden_units = get_nn_hidden_units()
+            hidden_layer_sizes = tuple([hidden_units] * num_layers)
+
+            # Create and fit neural network
+            nn = NeuralNetworkRegression(
+                hidden_layer_sizes=hidden_layer_sizes,
+                alpha=10**get_nn_regularization(),  # Convert from log10 scale
+                n_ensemble=get_nn_ensemble_size(),
+                max_iter=500
+            )
+            nn.fit(X_train_model, y_train)
+
+            # Get predictions with uncertainty
+            y_pred, y_std = nn.predict(X_test_model, return_std=True)
         else:
             # Existing polynomial-basis models
             model.fit(X_train_model, y_train)
@@ -920,6 +1041,9 @@ def _(
         caption += fr', $n=${n} calib,  $\zeta$={get_zeta():.2f},  $\hat{{q}}=${qhat:.1f}'
     if gp_regression.value:
         caption += fr', GP: {get_gp_kernel_type()}, log ML={gp_log_ml:.1f}, {gp_sparsity:.1f}% sparse'
+    if neural_network.value:
+        _layers_str = f"{get_nn_num_layers()}×{get_nn_hidden_units()}"
+        caption += fr', NN: [{_layers_str}], ens={get_nn_ensemble_size()}'
     ax.set_title(caption)
     ax.set_xlim(-10, 10)
     ax.set_ylim(-1.5, 1.5)
@@ -1123,18 +1247,36 @@ def _(
         gp_mean_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 1, 0.1, -1, label='Mean regularization (log₁₀)', disabled=True)}</div>")
         gp_opt_button_elem = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.button(label='Optimize hyperparameters', disabled=True)}</div>")
 
+    # Neural network section with conditional styling
+    if neural_network.value:
+        nn_label = mo.md("**Neural network parameters**")
+        nn_hidden_units = mo.ui.slider(5, 50, 5, get_nn_hidden_units(), label='Hidden units', on_change=set_nn_hidden_units)
+        nn_num_layers = mo.ui.slider(1, 3, 1, get_nn_num_layers(), label='Hidden layers', on_change=set_nn_num_layers)
+        _log_reg_nn = get_nn_regularization()
+        nn_regularization = mo.ui.slider(-6, 0, 0.5, _log_reg_nn, label='Regularization (log₁₀)', on_change=set_nn_regularization)
+        nn_ensemble_size = mo.ui.slider(3, 10, 1, get_nn_ensemble_size(), label='Ensemble size', on_change=set_nn_ensemble_size)
+    else:
+        nn_label = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>Neural network parameters</p>")
+        nn_hidden_units = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 50, 5, get_nn_hidden_units(), label='Hidden units', disabled=True)}</div>")
+        nn_num_layers = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(1, 3, 1, get_nn_num_layers(), label='Hidden layers', disabled=True)}</div>")
+        nn_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 0, 0.5, -3, label='Regularization (log₁₀)', disabled=True)}</div>")
+        nn_ensemble_size = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(3, 10, 1, 5, label='Ensemble size', disabled=True)}</div>")
+
     controls = mo.hstack([
-        mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed]),    
+        mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed]),
         mo.vstack([
             mo.md("**Linear Methods**"),
             mo.left(bayesian),
             mo.left(conformal),
             mo.left(pops),
-            mo.md("**Kernel Methods**"),        
+            mo.md("**Kernel Methods**"),
             mo.left(gp_regression),
+            mo.md("**Non-linear Methods**"),
+            mo.left(neural_network),
         ]),
         mo.vstack([reg_label, P_elem, aleatoric, reg_separator, cp_label, calib_frac, zeta, cp_separator, pops_label, percentile_clipping]),
-        mo.vstack([gp_label, gp_kernel_dropdown, gp_lengthscale, gp_support_radius, gp_opt_button_elem, gp_separator, gp_use_poly_mean_elem, gp_poly_mean_degree, gp_joint_inference, gp_mean_regularization])
+        mo.vstack([gp_label, gp_kernel_dropdown, gp_lengthscale, gp_support_radius, gp_opt_button_elem, gp_separator, gp_use_poly_mean_elem, gp_poly_mean_degree, gp_joint_inference, gp_mean_regularization]),
+        mo.vstack([nn_label, nn_hidden_units, nn_num_layers, nn_regularization, nn_ensemble_size])
     ], gap=0.5)
 
     mo.Html(f'''
@@ -1159,8 +1301,9 @@ def _(mo):
     conformal = mo.ui.checkbox(False, label="Conformal prediction")
     pops = mo.ui.checkbox(False, label="POPS regression")
     gp_regression = mo.ui.checkbox(False, label="GP regression")
+    neural_network = mo.ui.checkbox(False, label="Neural network")
     gp_use_poly_mean = mo.ui.checkbox(False, label="Use polynomial mean function")
-    return bayesian, conformal, gp_regression, gp_use_poly_mean, pops
+    return bayesian, conformal, gp_regression, gp_use_poly_mean, neural_network, pops
 
 
 @app.cell(hide_code=True)
@@ -1193,6 +1336,12 @@ def _(mo):
     get_gp_joint_inference, set_gp_joint_inference = mo.state(False)
     get_gp_mean_regularization, set_gp_mean_regularization = mo.state(0.1)
 
+    # Neural network-specific state
+    get_nn_hidden_units, set_nn_hidden_units = mo.state(20)
+    get_nn_num_layers, set_nn_num_layers = mo.state(1)
+    get_nn_regularization, set_nn_regularization = mo.state(-3)  # log10 scale
+    get_nn_ensemble_size, set_nn_ensemble_size = mo.state(5)
+
     # Button click count tracking to prevent infinite loops
     get_bayes_opt_count, set_bayes_opt_count = mo.state(0)
     get_gp_opt_count, set_gp_opt_count = mo.state(0)
@@ -1209,6 +1358,10 @@ def _(mo):
         get_gp_mean_regularization,
         get_gp_poly_mean_degree,
         get_gp_support_radius,
+        get_nn_ensemble_size,
+        get_nn_hidden_units,
+        get_nn_num_layers,
+        get_nn_regularization,
         get_percentile_clipping,
         get_seed,
         get_sigma,
@@ -1225,6 +1378,10 @@ def _(mo):
         set_gp_mean_regularization,
         set_gp_poly_mean_degree,
         set_gp_support_radius,
+        set_nn_ensemble_size,
+        set_nn_hidden_units,
+        set_nn_num_layers,
+        set_nn_regularization,
         set_percentile_clipping,
         set_seed,
         set_sigma,
