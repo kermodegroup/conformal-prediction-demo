@@ -134,7 +134,6 @@ def _(BayesianRidge, np):
             if rescale:
                 y_std = y_std * self.qhat
             return y_pred, y_std
-
     return ConformalPrediction, MyBayesianRidge
 
 
@@ -1040,7 +1039,7 @@ def _(
         reg_label = mo.md("**Regression parameters**")
         # Use fixed default value (not state) to avoid circular dependency
         # Manual slider changes still update state via on_change, but slider doesn't react to state changes
-        P_slider = mo.ui.slider(1, 15, 1, 3, label="Fit parameters $P$", on_change=set_P)
+        P_slider = mo.ui.slider(5, 15, 1, 10, label="Fit parameters $P$", on_change=set_P)
         P_elem = P_slider  # For display
         aleatoric = mo.ui.checkbox(False, label="Include aleatoric uncertainty")
         reg_separator = mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd;'>")
@@ -1127,10 +1126,11 @@ def _(
     controls = mo.hstack([
         mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed]),    
         mo.vstack([
-            mo.md("**Analysis Methods**"),
+            mo.md("**Linear Methods**"),
             mo.left(bayesian),
             mo.left(conformal),
             mo.left(pops),
+            mo.md("**Kernel Methods**"),        
             mo.left(gp_regression),
         ]),
         mo.vstack([reg_label, P_elem, aleatoric, reg_separator, cp_label, calib_frac, zeta, cp_separator, pops_label, percentile_clipping]),
