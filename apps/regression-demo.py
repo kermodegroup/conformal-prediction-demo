@@ -232,7 +232,6 @@ def _(np):
                 return y_pred, y_std
             else:
                 return y_pred
-
     return (NeuralNetworkRegression,)
 
 
@@ -1104,6 +1103,10 @@ def _(
     get_gp_kernel_type,
     get_gp_mean_regularization,
     get_gp_poly_mean_degree,
+    get_nn_ensemble_size,
+    get_nn_hidden_units,
+    get_nn_num_layers,
+    get_nn_regularization,
     get_percentile_clipping,
     get_seed,
     get_sigma,
@@ -1112,6 +1115,7 @@ def _(
     gp_regression,
     gp_use_poly_mean,
     mo,
+    neural_network,
     np,
     pops,
     set_N_samples,
@@ -1126,6 +1130,10 @@ def _(
     set_gp_mean_regularization,
     set_gp_poly_mean_degree,
     set_gp_support_radius,
+    set_nn_ensemble_size,
+    set_nn_hidden_units,
+    set_nn_num_layers,
+    set_nn_regularization,
     set_percentile_clipping,
     set_seed,
     set_sigma,
@@ -1307,7 +1315,14 @@ def _(mo):
     gp_regression = mo.ui.checkbox(False, label="GP regression")
     neural_network = mo.ui.checkbox(False, label="Neural network")
     gp_use_poly_mean = mo.ui.checkbox(False, label="Use polynomial mean function")
-    return bayesian, conformal, gp_regression, gp_use_poly_mean, neural_network, pops
+    return (
+        bayesian,
+        conformal,
+        gp_regression,
+        gp_use_poly_mean,
+        neural_network,
+        pops,
+    )
 
 
 @app.cell(hide_code=True)
