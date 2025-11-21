@@ -1216,11 +1216,7 @@ def _(
             gp_mean_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 1, 0.1, _log_reg, label='Mean regularization (log₁₀)', disabled=True)}</div>")
 
         gp_lengthscale = gp_lengthscale_slider  # For display
-        # Conditionally enable/disable support radius based on kernel type
-        if _kernel_type == 'bump':
-            gp_support_radius = gp_support_radius_slider  # Active when bump kernel
-        else:
-            gp_support_radius = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{gp_support_radius_slider}</div>")
+        gp_support_radius = gp_support_radius_slider  # For display
         gp_opt_button_elem = gp_optimize_button
         # Show gp_use_poly_mean checkbox normally when GP regression is enabled
         gp_use_poly_mean_elem = gp_use_poly_mean
