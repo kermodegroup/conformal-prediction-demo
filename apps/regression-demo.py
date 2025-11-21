@@ -1351,7 +1351,6 @@ def _(
     get_filter_max,
     get_filter_min,
     get_function_type,
-    get_gp_joint_inference,
     get_gp_kernel_type,
     get_gp_poly_mean_degree,
     gp_lengthscale_slider,
@@ -1389,7 +1388,8 @@ def _(
 
     # Get polynomial mean settings
     _use_poly_mean = gp_use_poly_mean.value
-    _joint_inference = get_gp_joint_inference()
+    # Use default values to avoid circular dependency (cell modifies set_gp_mean_regularization)
+    _joint_inference = False  # Default: False
     _poly_degree = get_gp_poly_mean_degree()
     # Use default initial value for mean regularization (will be optimized)
     _mean_reg = 0.1
