@@ -147,7 +147,7 @@ def _(np):
 
         Uses sklearn's MLPRegressor with ensemble for uncertainty estimation
         """
-        def __init__(self, hidden_layer_sizes=(20,), alpha=0.001, n_ensemble=5, max_iter=500):
+        def __init__(self, hidden_layer_sizes=(20,), alpha=0.001, n_ensemble=5, max_iter=1000, tol=1e-3):
             """
             Parameters:
             -----------
@@ -157,13 +157,16 @@ def _(np):
                 L2 regularization strength
             n_ensemble : int, default=5
                 Number of networks in ensemble for uncertainty estimation
-            max_iter : int, default=500
+            max_iter : int, default=1000
                 Maximum number of iterations for LBFGS solver
+            tol : float, default=1e-3
+                Tolerance for optimization (relaxed for faster convergence)
             """
             self.hidden_layer_sizes = hidden_layer_sizes
             self.alpha = alpha
             self.n_ensemble = n_ensemble
             self.max_iter = max_iter
+            self.tol = tol
             self.ensemble_ = []
             self.x_mean_ = None
             self.x_std_ = None
@@ -184,6 +187,7 @@ def _(np):
                     solver='lbfgs',
                     alpha=self.alpha,
                     max_iter=self.max_iter,
+                    tol=self.tol,
                     random_state=i,  # Different seed for each ensemble member
                     warm_start=False
                 )
@@ -995,8 +999,8 @@ def _(
             nn = NeuralNetworkRegression(
                 hidden_layer_sizes=hidden_layer_sizes,
                 alpha=10**get_nn_regularization(),  # Convert from log10 scale
-                n_ensemble=get_nn_ensemble_size(),
-                max_iter=500
+                n_ensemble=get_nn_ensemble_size()
+                # Uses default max_iter=1000, tol=1e-3 for reliable convergence
             )
             nn.fit(X_train_model, y_train)
 
