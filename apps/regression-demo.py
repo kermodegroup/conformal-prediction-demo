@@ -44,37 +44,6 @@ def _():
     from POPSRegression import POPSRegression
     from scipy.linalg import cho_factor, cho_solve
 
-    class RadialBasisFunctions:
-        """
-        A set of linear basis functions.
-
-        Arguments:
-        X   -  The centers of the radial basis functions.
-        ell -  The assumed lengthscale.
-        """
-
-        def __init__(self, X, ell):
-            self.X = X
-            self.ell = ell
-            self.num_basis = X.shape[0]
-
-        def __call__(self, x):
-            return np.exp(-0.5 * (x - self.X) ** 2 / self.ell**2).flatten()
-
-    def design_matrix(X, phi):
-        """
-        Arguments:
-
-        X   -  The observed inputs
-        phi -  The basis functions
-        """
-        num_observations = X.shape[0]
-        num_basis = phi.num_basis
-        Phi = np.zeros((num_observations, num_basis))
-        for i in range(num_observations):
-            Phi[i, :] = phi(X[i, :])
-        return Phi    
-
     # Customize default plotting style
     import seaborn as sns
     sns.set_context('talk')
@@ -93,9 +62,6 @@ def _():
 
 @app.cell
 def _(np):
-    def noise(size, variance):
-        return np.random.normal(scale=np.sqrt(variance), size=size)
-
     def g(X, noise_variance, function_type='sin'):
         """Generate data from different ground truth functions"""
         if function_type == 'sin':
@@ -115,7 +81,7 @@ def _(np):
         else:
             y = np.sin(X)  # Default to sin
 
-        return y + noise(X.shape, noise_variance)
+        return y + np.random.normal(scale=np.sqrt(noise_variance), size=X.shape)
     return (g,)
 
 
@@ -147,45 +113,6 @@ def _(BayesianRidge, np):
             else:
                 return 0.0
 
-    class MyPOPSRegression(MyBayesianRidge):
-        def fit(self, X, y, prior=None, clipping=0.05, n_samples=100):
-            super().fit(X, y)       
-            num_observations, num_basis = X.shape
-            if prior is None:
-                prior = np.eye(num_basis)
-            H = prior.T @ prior + X.T @ X
-            dθ = np.zeros((num_observations, num_basis))
-            for i in range(num_observations):
-                V = np.linalg.solve(H, X[i, :])
-                leverage = X[i, :].T @ V
-                E        = X[i, :].T @ self.coef_
-                dy       = y[i] - E
-                dθ[i, :] = (dy / leverage) * V
-            self._dθ = dθ
-
-            U, S, Vh = np.linalg.svd(self._dθ, full_matrices=False)
-            projected = self._dθ @ Vh.T
-            num_basis = projected.shape[1]
-            lower  = [np.quantile(projected[:, i], clipping) for i in range(num_basis) ]
-            upper  = [np.quantile(projected[:, i], 1.0 - clipping) for i in range(num_basis) ] 
-            bounds = np.c_[[lower, upper]].T
-
-            δθ = np.zeros((n_samples, num_basis))
-            for j in range(n_samples):
-                u = np.random.uniform(num_basis)
-                δθ[j, :] = (Vh @ (bounds[:, 0] + bounds[:, 1] * u)) + self.coef_
-            self._misspecification_sigma = δθ.T @ δθ / n_samples
-
-        def predict(self, X, return_std=False, aleatoric=False):
-            y_pred = super().predict(X)
-            if return_std:
-                y_std = ((X @ self._misspecification_sigma) * X).sum(axis=1)
-                if aleatoric:
-                    y_std = np.sqrt(y_std**2 + 1.0 / self.alpha_)
-                return (y_pred, y_std)
-            else:
-                return y_pred        
-
     class ConformalPrediction(MyBayesianRidge):
         def get_scores(self, X, y, aleatoric=False):
             y_pred, y_std = self.predict(X, return_std=True, rescale=False, aleatoric=aleatoric)
@@ -208,50 +135,6 @@ def _(BayesianRidge, np):
                 y_std = y_std * self.qhat
             return y_pred, y_std
 
-    def optimize_polynomial_degree(X_train, y_train, max_degree=15):
-        """
-        Find optimal polynomial degree by maximizing marginal likelihood
-
-        Parameters:
-        -----------
-        X_train : array (n_train, 1)
-        y_train : array (n_train,)
-        max_degree : int, maximum degree to try
-
-        Returns:
-        --------
-        optimal_degree : int
-        log_marginal_likelihoods : list of (degree, log_ml) tuples
-        """
-        from sklearn.preprocessing import PolynomialFeatures
-
-        log_mls = []
-        best_log_ml = -np.inf
-        best_degree = 1
-
-        for degree in range(1, max_degree + 1):
-            try:
-                # Create polynomial features
-                poly = PolynomialFeatures(degree=degree, include_bias=True)
-                Phi = poly.fit_transform(X_train)
-
-                # Fit Bayesian Ridge
-                model = MyBayesianRidge(fit_intercept=False)
-                model.fit(Phi, y_train)
-
-                # Get log marginal likelihood
-                log_ml = model.log_marginal_likelihood()
-                log_mls.append((degree, log_ml))
-
-                if log_ml > best_log_ml:
-                    best_log_ml = log_ml
-                    best_degree = degree
-
-            except Exception as e:
-                print(f"Failed for degree {degree}: {e}")
-                continue
-
-        return best_degree, log_mls
     return ConformalPrediction, MyBayesianRidge
 
 
@@ -780,7 +663,7 @@ def _(cho_factor, cho_solve, np):
                     return y_mean, y_std_total, mean_test_posterior, y_std_gp_component, y_std_mean_component
 
                 except np.linalg.LinAlgError:
-                    print(f"Warning: Cholesky failed for joint inference")
+                    print("Warning: Cholesky failed for joint inference")
                     return np.zeros_like(X_test), np.ones_like(X_test), None, None, None
             else:
                 # Sequential inference path: fit GP on residuals
@@ -910,8 +793,7 @@ def _(
 
     fig, ax = plt.subplots(figsize=(14, 5))
     np.random.seed(seed.value)
-    # Use function_dropdown.value if available, otherwise default to 'sin'
-    _func_type = function_dropdown.value #function_dropdown.value if function_dropdown is not None else 'sin'
+    _func_type = function_dropdown.value
     X_data, y_data, X_test, y_test = get_data(N_samples.value, sigma=sigma.value, function_type=_func_type)
 
     X_train, X_calib, y_train, y_calib = train_test_split(X_data, y_data, test_size=get_calib_frac(), random_state=get_seed())
