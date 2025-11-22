@@ -1315,7 +1315,7 @@ def _(
     ], gap=0.5)
 
     mo.Html(f'''
-    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
+    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px; min-height: 450px;">
         {controls}
     </div>
     ''')
