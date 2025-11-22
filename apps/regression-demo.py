@@ -50,7 +50,7 @@ def _(mo):
         /* Dashboard section - fixed height with internal scrolling if needed */
         .app-dashboard {
             flex-shrink: 0;
-            max-height: 30vh;
+            max-height: 35vh;
             overflow-y: auto;
             padding: 10px;
             background-color: #f8f9fa;
@@ -877,7 +877,7 @@ def _(mo, qr_base64):
                 <a href="https://github.com/kermodegroup/demos" target="_blank" style="color: #0066cc; text-decoration: none;">github.com/kermodegroup/demos</a>
                 </span></p>
             </div>
-            <img src="data:image/png;base64,{qr_base64}" alt="QR Code" style="width: 150px; height: 150px; flex-shrink: 0;" />
+            <img src="data:image/png;base64,{qr_base64}" alt="QR Code" style="width: 100px; height: 100px; flex-shrink: 0;" />
         </div>
     </div>
     ''')
@@ -946,7 +946,7 @@ def _(
 
         return X_train, y_train, X_test, y_test
 
-    fig, ax = plt.subplots(figsize=(14, 4.5))
+    fig, ax = plt.subplots(figsize=(14, 5))
     np.random.seed(seed.value)
     _func_type = function_dropdown.value
     X_data, y_data, X_test, y_test = get_data(N_samples.value, sigma=sigma.value, function_type=_func_type)
