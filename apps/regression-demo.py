@@ -1302,10 +1302,11 @@ def _(
     ])
 
     # Create tabs for method-specific parameters
+    # Use list of tuples to ensure tab order: Linear -> Kernel -> Non-linear
     method_params_tabs = mo.ui.tabs({
-        "Linear Methods": linear_methods_tab,
-        "Kernel Methods": kernel_methods_tab,
-        "Non-linear Methods": nonlinear_methods_tab
+        "1. Linear Methods": linear_methods_tab,
+        "2. Kernel Methods": kernel_methods_tab,
+        "3. Non-linear Methods": nonlinear_methods_tab
     })
 
     # Create analysis methods column with fixed height to prevent jumping
