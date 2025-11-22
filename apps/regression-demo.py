@@ -1308,9 +1308,16 @@ def _(
         "Non-linear Methods": nonlinear_methods_tab
     })
 
+    # Wrap each column with max-width to prevent excessive spacing on wide screens
+    dataset_column = mo.Html(f'''
+    <div style="max-width: 300px;">
+        {mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed])}
+    </div>
+    ''')
+
     # Create analysis methods column with fixed height to prevent jumping
     analysis_methods_column = mo.Html(f'''
-    <div style="min-height: 400px; display: flex; flex-direction: column;">
+    <div style="min-height: 400px; max-width: 250px; display: flex; flex-direction: column;">
         {mo.vstack([
             mo.md("**Analysis Methods**"),
             mo.left(bayesian),
@@ -1324,10 +1331,16 @@ def _(
     </div>
     ''')
 
+    tabs_column = mo.Html(f'''
+    <div style="max-width: 400px; flex-grow: 1;">
+        {method_params_tabs}
+    </div>
+    ''')
+
     controls = mo.hstack([
-        mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed]),
+        dataset_column,
         analysis_methods_column,
-        method_params_tabs
+        tabs_column
     ], gap=0.2)
 
     mo.Html(f'''
