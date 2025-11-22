@@ -1308,9 +1308,10 @@ def _(
         "Non-linear Methods": nonlinear_methods_tab
     })
 
-    controls = mo.hstack([
-        mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed]),
-        mo.vstack([
+    # Create analysis methods column with fixed height to prevent jumping
+    analysis_methods_column = mo.Html(f'''
+    <div style="min-height: 400px; display: flex; flex-direction: column;">
+        {mo.vstack([
             mo.md("**Analysis Methods**"),
             mo.left(bayesian),
             mo.left(conformal),
@@ -1319,12 +1320,18 @@ def _(
             mo.left(gp_regression),
             mo.md("**Non-linear Methods**"),
             mo.left(neural_network),
-        ]),
+        ])}
+    </div>
+    ''')
+
+    controls = mo.hstack([
+        mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed]),
+        analysis_methods_column,
         method_params_tabs
-    ], gap=0.5)
+    ], gap=0.2)
 
     mo.Html(f'''
-    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px; min-height: 450px;">
+    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px; min-height: 450px; max-width: 80%; margin-left: auto; margin-right: auto;">
         {controls}
     </div>
     ''')
