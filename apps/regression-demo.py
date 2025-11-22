@@ -1274,10 +1274,35 @@ def _(
         nn_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 0, 0.5, -3, label='Regularization (log₁₀)', disabled=True)}</div>")
         nn_ensemble_size = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(3, 10, 1, 5, label='Ensemble size', disabled=True)}</div>")
 
+    # Create tab content for each method category
+    linear_methods_tab = mo.vstack([
+        reg_label, P_elem, aleatoric, reg_separator,
+        cp_label, calib_frac, zeta, cp_separator,
+        pops_label, percentile_clipping
+    ])
+
+    kernel_methods_tab = mo.vstack([
+        gp_label, gp_kernel_dropdown, gp_lengthscale, gp_support_radius,
+        gp_opt_button_elem, gp_separator, gp_use_poly_mean_elem,
+        gp_poly_mean_degree, gp_joint_inference, gp_mean_regularization
+    ])
+
+    nonlinear_methods_tab = mo.vstack([
+        nn_label, nn_hidden_units, nn_num_layers,
+        nn_regularization, nn_ensemble_size
+    ])
+
+    # Create tabs for method-specific parameters
+    method_params_tabs = mo.ui.tabs({
+        "Linear Methods": linear_methods_tab,
+        "Kernel Methods": kernel_methods_tab,
+        "Non-linear Methods": nonlinear_methods_tab
+    })
+
     controls = mo.hstack([
         mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed]),
         mo.vstack([
-            mo.md("**Linear Methods**"),
+            mo.md("**Analysis Methods**"),
             mo.left(bayesian),
             mo.left(conformal),
             mo.left(pops),
@@ -1286,9 +1311,7 @@ def _(
             mo.md("**Non-linear Methods**"),
             mo.left(neural_network),
         ]),
-        mo.vstack([reg_label, P_elem, aleatoric, reg_separator, cp_label, calib_frac, zeta, cp_separator, pops_label, percentile_clipping]),
-        mo.vstack([gp_label, gp_kernel_dropdown, gp_lengthscale, gp_support_radius, gp_opt_button_elem, gp_separator, gp_use_poly_mean_elem, gp_poly_mean_degree, gp_joint_inference, gp_mean_regularization]),
-        mo.vstack([nn_label, nn_hidden_units, nn_num_layers, nn_regularization, nn_ensemble_size])
+        method_params_tabs
     ], gap=0.5)
 
     mo.Html(f'''
