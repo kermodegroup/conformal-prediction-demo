@@ -893,6 +893,7 @@ def _(
     POPSRegression,
     PolynomialFeatures,
     aleatoric,
+    aleatoric_gp,
     bayesian,
     bump_kernel,
     compute_kernel_matrix,
@@ -1045,7 +1046,7 @@ def _(
                 ax.fill_between(X_test[:, 0], y_pred - y_std_mean, y_pred + y_std_mean,
                                alpha=0.25, color='orange', label='Mean uncertainty')
 
-            if aleatoric.value:
+            if aleatoric_gp.value:
                 # Add aleatoric noise to GP predictions
                 y_std = np.sqrt(y_std**2 + sigma.value**2)
         elif label == 'Neural network':
@@ -1096,19 +1097,7 @@ def _(
             ax.plot(X_test[:, 0], y_min, 'k--', lw=1, label='POPS min/max')
             ax.plot(X_test[:, 0], y_max, 'k--', lw=1)
 
-    caption = fr'$N=${get_N_samples()} data, $\sigma$={get_sigma():.2f} noise'
-    if bayesian.value or conformal.value:
-        caption += fr', $P=${get_P()} params'
-        if bayes_log_ml != 0.0:
-            caption += fr', log ML={bayes_log_ml:.1f}'
-    if conformal.value:
-        caption += fr', $n=${n} calib,  $\zeta$={get_zeta():.2f},  $\hat{{q}}=${qhat:.1f}'
-    if gp_regression.value:
-        caption += fr', GP: {get_gp_kernel_type()}, log ML={gp_log_ml:.1f}, {gp_sparsity:.1f}% sparse'
-    if neural_network.value:
-        _layers_str = f"{get_nn_num_layers()}×{get_nn_hidden_units()}"
-        caption += fr', NN: [{_layers_str}], ens={get_nn_ensemble_size()}'
-    ax.set_title(caption)
+    # No title needed - all info is in the dashboard and outputs bar
     ax.set_xlim(-10, 10)
     ax.set_ylim(-1.5, 1.5)
     ax.set_xlabel('$x$')
@@ -1152,7 +1141,7 @@ def _(
         {mo.center(fig)}
     </div>
     ''')
-    return
+    return (bayes_log_ml, n, qhat, gp_log_ml, gp_sparsity)
 
 
 @app.cell(hide_code=True)
@@ -1234,7 +1223,7 @@ def _(
     )
 
     # Regression parameters with conditional styling
-    reg_enabled = bayesian.value or conformal.value or pops.value or gp_regression.value
+    reg_enabled = bayesian.value or conformal.value or pops.value
 
     if reg_enabled:
         # Use fixed default value (not state) to avoid circular dependency
@@ -1267,6 +1256,7 @@ def _(
 
     # GP regression section with conditional styling
     if gp_regression.value:
+        aleatoric_gp = mo.ui.checkbox(False, label="Include aleatoric uncertainty")
         gp_kernel_dropdown = mo.ui.dropdown(
             options=['rbf', 'polynomial', 'bump'],
             value=get_gp_kernel_type(),
@@ -1302,6 +1292,7 @@ def _(
         # Show gp_use_poly_mean checkbox normally when GP regression is enabled
         gp_use_poly_mean_elem = gp_use_poly_mean
     else:
+        aleatoric_gp = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Include aleatoric uncertainty', disabled=True)}</div>")
         # Dropdown doesn't have disabled attribute, just show greyed out
         gp_kernel_dropdown = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{mo.ui.dropdown(['bump', 'polynomial', 'rbf'], value='bump', label='Kernel type')}</div>")
         gp_lengthscale_slider = None  # No slider when disabled
@@ -1348,6 +1339,7 @@ def _(
     ])
 
     kernel_methods_tab = mo.vstack([
+        aleatoric_gp,
         gp_kernel_dropdown, gp_lengthscale, gp_support_radius,
         gp_opt_button_elem, gp_separator, gp_use_poly_mean_elem,
         gp_poly_mean_degree, gp_joint_inference, gp_mean_regularization
@@ -1408,12 +1400,62 @@ def _(
     return (
         N_samples,
         aleatoric,
+        aleatoric_gp,
         function_dropdown,
         gp_lengthscale_slider,
         gp_support_radius_slider,
         seed,
         sigma,
     )
+
+
+@app.cell(hide_code=True)
+def _(bayes_log_ml, bayesian, conformal, gp_log_ml, gp_optimize_button, gp_regression, gp_sparsity, mo, n, opt_message, qhat):
+    # Display computed outputs below the dashboard (only values not in sliders)
+    output_items = []
+
+    if bayesian.value and bayes_log_ml != 0.0:
+        output_items.append(f"Bayesian log ML: {bayes_log_ml:.1f}")
+
+    if conformal.value:
+        output_items.append(f"Calibration size (n): {n}")
+        output_items.append(f"Quantile (q̂): {qhat:.2f}")
+
+    if gp_regression.value:
+        # Add optimized hyperparameters if available
+        if gp_optimize_button.value and opt_message is not None and isinstance(opt_message, dict):
+            if 'error' in opt_message:
+                output_items.append(f"Opt error: {opt_message['error']}")
+            else:
+                # Show optimized log ML if available, otherwise current log ML
+                log_ml_value = opt_message.get('log_ml', gp_log_ml)
+                output_items.append(f"GP log ML: {log_ml_value:.1f}")
+
+                if opt_message.get('lengthscale') is not None:
+                    output_items.append(f"Opt lengthscale: {opt_message['lengthscale']:.3f}")
+                if opt_message.get('support_radius') is not None:
+                    output_items.append(f"Opt support: {opt_message['support_radius']:.3f}")
+                if opt_message.get('mean_reg') is not None:
+                    output_items.append(f"Opt mean reg: {opt_message['mean_reg']:.4f}")
+        else:
+            # Show current log ML when not optimized
+            output_items.append(f"GP log ML: {gp_log_ml:.1f}")
+
+        output_items.append(f"Sparsity: {gp_sparsity:.1f}%")
+
+    # Display outputs
+    if output_items:
+        outputs_text = " | ".join(output_items)
+        result = mo.Html(f'''
+        <div style="background-color: #e8f4f8; padding: 8px 15px; border-radius: 5px; margin: 0 auto 10px auto; max-width: 90%; text-align: center; font-size: 14px;">
+            <b>Outputs:</b> {outputs_text}
+        </div>
+        ''')
+    else:
+        result = mo.md("")
+
+    result
+    return
 
 
 @app.cell(hide_code=True)
@@ -1542,92 +1584,74 @@ def _(
 ):
     # Perform GP optimization when button is clicked
     # Only run if button clicked AND GP sliders are available (GP regression enabled)
-    mo.stop(not gp_optimize_button.value or gp_lengthscale_slider is None)
+    opt_message = None
 
-    # Regenerate training data (use _ prefix to avoid variable redefinition)
-    np.random.seed(seed.value)
-    _x_train = np.append(np.random.uniform(-10, 10, size=N_samples.value), np.linspace(-10, 10, 2))
-    _x_train = _x_train[(_x_train < get_filter_min()) | (_x_train > get_filter_max())]
-    _x_train = np.sort(_x_train)
-    _y_train = g(_x_train, noise_variance=sigma.value**2, function_type=get_function_type())
+    if gp_optimize_button.value and gp_lengthscale_slider is not None:
+        # Regenerate training data (use _ prefix to avoid variable redefinition)
+        np.random.seed(seed.value)
+        _x_train = np.append(np.random.uniform(-10, 10, size=N_samples.value), np.linspace(-10, 10, 2))
+        _x_train = _x_train[(_x_train < get_filter_min()) | (_x_train > get_filter_max())]
+        _x_train = np.sort(_x_train)
+        _y_train = g(_x_train, noise_variance=sigma.value**2, function_type=get_function_type())
 
-    # Set initial parameters - read from sliders, NOT state getters (avoids circular dependency)
-    initial_params = {
-        'lengthscale': gp_lengthscale_slider.value,
-        'support_radius': gp_support_radius_slider.value,
-        'degree': get_P(),
-        'sigma': 0.1,
-        'noise': sigma.value**2
-    }
+        # Set initial parameters - read from sliders, NOT state getters (avoids circular dependency)
+        initial_params = {
+            'lengthscale': gp_lengthscale_slider.value,
+            'support_radius': gp_support_radius_slider.value,
+            'degree': get_P(),
+            'sigma': 0.1,
+            'noise': sigma.value**2
+        }
 
-    # Get polynomial mean settings
-    _use_poly_mean = gp_use_poly_mean.value
-    # Use default values to avoid circular dependency (cell modifies set_gp_mean_regularization)
-    _joint_inference = False  # Default: False
-    _poly_degree = get_gp_poly_mean_degree()
-    # Use default initial value for mean regularization (will be optimized)
-    _mean_reg = 0.1
+        # Get polynomial mean settings
+        _use_poly_mean = gp_use_poly_mean.value
+        # Use default values to avoid circular dependency (cell modifies set_gp_mean_regularization)
+        _joint_inference = False  # Default: False
+        _poly_degree = get_gp_poly_mean_degree()
+        # Use default initial value for mean regularization (will be optimized)
+        _mean_reg = 0.1
 
-    # Optimize
-    try:
-        optimized_params, log_ml = optimize_gp_hyperparameters(
-            _x_train, _y_train, get_gp_kernel_type(), initial_params, max_iter=50,
-            use_polynomial_mean=_use_poly_mean,
-            poly_degree=_poly_degree,
-            joint_inference=_joint_inference,
-            mean_regularization_strength=_mean_reg
-        )
+        # Optimize
+        opt_lengthscale = None  # Initialize variables used in output formatting
+        opt_support = None
+        opt_mean_reg = None
 
-        # Update sliders with optimized values
-        if 'lengthscale' in optimized_params:
-            # Clamp to slider bounds [0.1, 5.0]
-            opt_lengthscale = np.clip(optimized_params['lengthscale'], 0.1, 5.0)
-            set_gp_lengthscale(float(opt_lengthscale))
+        try:
+            optimized_params, log_ml = optimize_gp_hyperparameters(
+                _x_train, _y_train, get_gp_kernel_type(), initial_params, max_iter=50,
+                use_polynomial_mean=_use_poly_mean,
+                poly_degree=_poly_degree,
+                joint_inference=_joint_inference,
+                mean_regularization_strength=_mean_reg
+            )
 
-        if 'support_radius' in optimized_params:
-            # Clamp to slider bounds [0.5, 5.0]
-            opt_support = np.clip(optimized_params['support_radius'], 0.5, 5.0)
-            set_gp_support_radius(float(opt_support))
+            # Update sliders with optimized values
+            if 'lengthscale' in optimized_params:
+                # Clamp to slider bounds [0.1, 5.0]
+                opt_lengthscale = np.clip(optimized_params['lengthscale'], 0.1, 5.0)
+                set_gp_lengthscale(float(opt_lengthscale))
 
-        if 'mean_regularization' in optimized_params:
-            # Clamp to valid range [10^-6, 10^1]
-            opt_mean_reg = np.clip(optimized_params['mean_regularization'], 1e-6, 10.0)
-            set_gp_mean_regularization(float(opt_mean_reg))
+            if 'support_radius' in optimized_params:
+                # Clamp to slider bounds [0.5, 5.0]
+                opt_support = np.clip(optimized_params['support_radius'], 0.5, 5.0)
+                set_gp_support_radius(float(opt_support))
 
-        # Format output based on kernel type
-        _kernel_type = get_gp_kernel_type()
-        _output_lines = [
-            "### ✓ GP Hyperparameter Optimization Complete",
-            f"**Kernel:** {_kernel_type}",
-            f"**Log Marginal Likelihood:** {log_ml:.3f}",
-            ""
-        ]
+            if 'mean_regularization' in optimized_params:
+                # Clamp to valid range [10^-6, 10^1]
+                opt_mean_reg = np.clip(optimized_params['mean_regularization'], 1e-6, 10.0)
+                set_gp_mean_regularization(float(opt_mean_reg))
 
-        if _use_poly_mean and _joint_inference:
-            _output_lines.append(f"**Polynomial Mean:** degree {_poly_degree}, joint inference enabled")
-            _output_lines.append("")
+            # Store optimized parameters for display in output cell
+            opt_message = {
+                'lengthscale': float(opt_lengthscale) if opt_lengthscale is not None else None,
+                'support_radius': float(opt_support) if opt_support is not None else None,
+                'mean_reg': float(opt_mean_reg) if opt_mean_reg is not None else None,
+                'log_ml': float(log_ml)
+            }
+        except Exception as e:
+            opt_message = {'error': str(e)}
 
-        _output_lines.append("**Optimized Parameters:**")
-
-        if 'lengthscale' in optimized_params:
-            _output_lines.append(f"- **Lengthscale:** {optimized_params['lengthscale']:.4f} (clamped: {opt_lengthscale:.4f})")
-
-        if 'support_radius' in optimized_params:
-            _output_lines.append(f"- **Support Radius:** {optimized_params['support_radius']:.4f} (clamped: {opt_support:.4f})")
-
-        if 'sigma' in optimized_params:
-            _output_lines.append(f"- **Sigma:** {optimized_params['sigma']:.4f}")
-
-        if 'noise' in optimized_params:
-            _output_lines.append(f"- **Noise:** {optimized_params['noise']:.6f}")
-
-        if 'mean_regularization' in optimized_params:
-            _output_lines.append(f"- **Mean Regularization:** {optimized_params['mean_regularization']:.6f} (log₁₀: {np.log10(opt_mean_reg):.2f}, clamped: {opt_mean_reg:.6f})")
-
-        mo.output.append(mo.md("\n".join(_output_lines)))
-    except Exception as e:
-        mo.output.append(mo.md(f"### ✗ Optimization Failed\n```\n{e}\n```"))
-    return
+    return (opt_message,)
 
 
 if __name__ == "__main__":
