@@ -1181,43 +1181,36 @@ def _(
     reg_enabled = bayesian.value or conformal.value or pops.value or gp_regression.value
 
     if reg_enabled:
-        reg_label = mo.md("**Regression parameters**")
         # Use fixed default value (not state) to avoid circular dependency
         # Manual slider changes still update state via on_change, but slider doesn't react to state changes
         P_slider = mo.ui.slider(5, 15, 1, 10, label="Fit parameters $P$", on_change=set_P)
         P_elem = P_slider  # For display
         aleatoric = mo.ui.checkbox(False, label="Include aleatoric uncertainty")
-        reg_separator = mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd;'>")
+        reg_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>")
     else:
-        reg_label = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>Regression parameters</p>")
         P_slider = None  # No slider when disabled
         P_elem = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 15, 1, 10, label='Degree $P$', disabled=True, on_change=set_P)}</div>")
         aleatoric = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Include aleatoric uncertainty', disabled=True)}</div>")
-        reg_separator = mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
+        reg_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
 
     # Conformal prediction section with conditional styling
     if conformal.value:
-        cp_label = mo.md("**Conformal prediction parameters**")
         calib_frac = mo.ui.slider(0.05, 0.5, 0.05, get_calib_frac(), label="Calibration fraction", on_change=set_calib_frac)
         zeta = mo.ui.slider(0.05, 0.3, 0.05, get_zeta(), label=r"Coverage $\zeta$", on_change=set_zeta)
-        cp_separator = mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd;'>")
+        cp_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>")
     else:
-        cp_label = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>Conformal prediction parameters</p>")
         calib_frac = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.05, 0.5, 0.05, get_calib_frac(), label='Calibration fraction', disabled=True, on_change=set_calib_frac)}</div>")
         zeta = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.05, 0.3, 0.05, get_zeta(), label=r'Coverage $\zeta$', disabled=True, on_change=set_zeta)}</div>")
-        cp_separator = mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
+        cp_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
 
     # POPS regression section with conditional styling
     if pops.value:
-        pops_label = mo.md("**POPS regression parameters**")
         percentile_clipping = mo.ui.slider(0, 10, 1, get_percentile_clipping(), label="Percentile clipping", on_change=set_percentile_clipping)
     else:
-        pops_label = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>POPS regression parameters</p>")
         percentile_clipping = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0, 10, 1, get_percentile_clipping(), label='Percentile clipping', disabled=True, on_change=set_percentile_clipping)}</div>")
 
     # GP regression section with conditional styling
     if gp_regression.value:
-        gp_label = mo.md("**GP regression parameters**")
         gp_kernel_dropdown = mo.ui.dropdown(
             options=['rbf', 'polynomial', 'bump'],
             value=get_gp_kernel_type(),
@@ -1249,18 +1242,17 @@ def _(
         gp_support_radius = gp_support_radius_slider  # For display
         gp_opt_button_elem = gp_optimize_button
         # Add horizontal separator between kernel hyperparameters and mean function controls
-        gp_separator = mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd;'>")
+        gp_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>")
         # Show gp_use_poly_mean checkbox normally when GP regression is enabled
         gp_use_poly_mean_elem = gp_use_poly_mean
     else:
-        gp_label = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>GP regression parameters</p>")
         # Dropdown doesn't have disabled attribute, just show greyed out
         gp_kernel_dropdown = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{mo.ui.dropdown(['bump', 'polynomial', 'rbf'], value='bump', label='Kernel type')}</div>")
         gp_lengthscale_slider = None  # No slider when disabled
         gp_support_radius_slider = None  # No slider when disabled
         gp_lengthscale = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.1, 5.0, 0.1, 0.5, label='Lengthscale', disabled=True)}</div>")
         gp_support_radius = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.5, 5.0, 0.1, 1.5, label='Support radius (bump only)', disabled=True)}</div>")
-        gp_separator = mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
+        gp_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
         # Wrap gp_use_poly_mean checkbox with disabled styling when GP regression is off
         gp_use_poly_mean_elem = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{gp_use_poly_mean}</div>")
         gp_poly_mean_degree = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(1, 10, 1, 3, label='Mean polynomial degree', disabled=True)}</div>")
@@ -1270,34 +1262,43 @@ def _(
 
     # Neural network section with conditional styling
     if neural_network.value:
-        nn_label = mo.md("**Neural network parameters**")
         nn_hidden_units = mo.ui.slider(5, 50, 5, get_nn_hidden_units(), label='Hidden units', on_change=set_nn_hidden_units)
         nn_num_layers = mo.ui.slider(1, 3, 1, get_nn_num_layers(), label='Hidden layers', on_change=set_nn_num_layers)
         _log_reg_nn = get_nn_regularization()
         nn_regularization = mo.ui.slider(-6, 0, 0.5, _log_reg_nn, label='Regularization (log₁₀)', on_change=set_nn_regularization)
         nn_ensemble_size = mo.ui.slider(3, 10, 1, get_nn_ensemble_size(), label='Ensemble size', on_change=set_nn_ensemble_size)
     else:
-        nn_label = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>Neural network parameters</p>")
         nn_hidden_units = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 50, 5, get_nn_hidden_units(), label='Hidden units', disabled=True)}</div>")
         nn_num_layers = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(1, 3, 1, get_nn_num_layers(), label='Hidden layers', disabled=True)}</div>")
         nn_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 0, 0.5, -3, label='Regularization (log₁₀)', disabled=True)}</div>")
         nn_ensemble_size = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(3, 10, 1, 5, label='Ensemble size', disabled=True)}</div>")
 
     # Create tab content for each method category
+    # Keep CP and POPS labels for clarity
+    if conformal.value:
+        cp_label_elem = mo.md("**Conformal prediction**")
+    else:
+        cp_label_elem = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>Conformal prediction</p>")
+
+    if pops.value:
+        pops_label_elem = mo.md("**POPS regression**")
+    else:
+        pops_label_elem = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>POPS regression</p>")
+
     linear_methods_tab = mo.vstack([
-        reg_label, P_elem, aleatoric, reg_separator,
-        cp_label, calib_frac, zeta, cp_separator,
-        pops_label, percentile_clipping
+        P_elem, aleatoric, reg_separator,
+        cp_label_elem, calib_frac, zeta, cp_separator,
+        pops_label_elem, percentile_clipping
     ])
 
     kernel_methods_tab = mo.vstack([
-        gp_label, gp_kernel_dropdown, gp_lengthscale, gp_support_radius,
+        gp_kernel_dropdown, gp_lengthscale, gp_support_radius,
         gp_opt_button_elem, gp_separator, gp_use_poly_mean_elem,
         gp_poly_mean_degree, gp_joint_inference, gp_mean_regularization
     ])
 
     nonlinear_methods_tab = mo.vstack([
-        nn_label, nn_hidden_units, nn_num_layers,
+        nn_hidden_units, nn_num_layers,
         nn_regularization, nn_ensemble_size
     ])
 
@@ -1317,7 +1318,7 @@ def _(
 
     # Create analysis methods column with fixed height to prevent jumping
     analysis_methods_column = mo.Html(f'''
-    <div style="width: 25%; min-width: 180px; min-height: 400px; display: flex; flex-direction: column;">
+    <div style="width: 25%; min-width: 180px; min-height: 360px; display: flex; flex-direction: column;">
         {mo.vstack([
             mo.md("**Analysis Methods**"),
             mo.left(bayesian),
@@ -1344,7 +1345,7 @@ def _(
     ], gap=0.2)
 
     mo.Html(f'''
-    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px; min-height: 450px; max-width: 80%; margin-left: auto; margin-right: auto;">
+    <div style="background-color: #f8f9fa; padding: 10px; border-radius: 8px; margin-bottom: 10px; min-height: 350px; max-width: 80%; margin-left: auto; margin-right: auto;">
         {controls}
     </div>
     ''')
