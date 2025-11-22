@@ -817,14 +817,15 @@ def _():
 @app.cell
 def _(mo, qr_base64):
     mo.Html(f'''
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0; padding-top: 0;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin: 0; padding: 0;">
         <div>
-            <p style='font-size: 24px; margin: 0; padding: 0;'><b>Bayesian Regression and UQ Demo</b>
-            <br><i>Live demo:</i>
+            <p style='font-size: 24px; margin: 0; padding: 0; line-height: 1.3;'><b>Bayesian Regression and UQ Demo</b>
+            <br><span style="font-size: 16px;"><i>Live demo:</i>
             <a href="https://kermodegroup.github.io/demos" target="_blank" style="color: #0066cc; text-decoration: none;">kermodegroup.github.io/demos</a>
-            <br><i>Code:</i>
+            &nbsp;&nbsp;|&nbsp;&nbsp;
+            <i>Code:</i>
             <a href="https://github.com/kermodegroup/demos" target="_blank" style="color: #0066cc; text-decoration: none;">github.com/kermodegroup/demos</a>
-            </p>
+            </span></p>
         </div>
         <img src="data:image/png;base64,{qr_base64}" alt="QR Code" style="width: 150px; height: 150px; flex-shrink: 0;" />
     </div>
