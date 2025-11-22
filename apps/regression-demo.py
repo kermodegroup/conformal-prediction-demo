@@ -27,6 +27,55 @@ def _(mo):
             margin-top: 0 !important;
             padding-top: 0 !important;
         }
+
+        /* Main layout container - use full viewport height */
+        body {
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .marimo-container {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Header section - fixed height */
+        .app-header {
+            flex-shrink: 0;
+            padding: 10px 0;
+        }
+
+        /* Dashboard section - fixed height with internal scrolling if needed */
+        .app-dashboard {
+            flex-shrink: 0;
+            max-height: 30vh;
+            overflow-y: auto;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            margin: 0 auto 10px auto;
+            max-width: 90%;
+        }
+
+        /* Plot section - takes remaining space */
+        .app-plot {
+            flex-grow: 1;
+            flex-shrink: 1;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        /* Ensure matplotlib figures scale properly */
+        .app-plot img,
+        .app-plot svg {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
     </style>
     ''')
     return
@@ -817,17 +866,19 @@ def _():
 @app.cell
 def _(mo, qr_base64):
     mo.Html(f'''
-    <div style="display: flex; justify-content: space-between; align-items: center; margin: 0; padding: 0;">
-        <div>
-            <p style='font-size: 24px; margin: 0; padding: 0; line-height: 1.3;'><b>Bayesian Regression and UQ Demo</b>
-            <br><span style="font-size: 16px;"><i>Live demo:</i>
-            <a href="https://kermodegroup.github.io/demos" target="_blank" style="color: #0066cc; text-decoration: none;">kermodegroup.github.io/demos</a>
-            &nbsp;&nbsp;|&nbsp;&nbsp;
-            <i>Code:</i>
-            <a href="https://github.com/kermodegroup/demos" target="_blank" style="color: #0066cc; text-decoration: none;">github.com/kermodegroup/demos</a>
-            </span></p>
+    <div class="app-header">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin: 0; padding: 0;">
+            <div>
+                <p style='font-size: 24px; margin: 0; padding: 0; line-height: 1.3;'><b>Bayesian Regression and UQ Demo</b>
+                <br><span style="font-size: 16px;"><i>Live demo:</i>
+                <a href="https://kermodegroup.github.io/demos" target="_blank" style="color: #0066cc; text-decoration: none;">kermodegroup.github.io/demos</a>
+                &nbsp;&nbsp;|&nbsp;&nbsp;
+                <i>Code:</i>
+                <a href="https://github.com/kermodegroup/demos" target="_blank" style="color: #0066cc; text-decoration: none;">github.com/kermodegroup/demos</a>
+                </span></p>
+            </div>
+            <img src="data:image/png;base64,{qr_base64}" alt="QR Code" style="width: 150px; height: 150px; flex-shrink: 0;" />
         </div>
-        <img src="data:image/png;base64,{qr_base64}" alt="QR Code" style="width: 150px; height: 150px; flex-shrink: 0;" />
     </div>
     ''')
     return
@@ -895,7 +946,7 @@ def _(
 
         return X_train, y_train, X_test, y_test
 
-    fig, ax = plt.subplots(figsize=(14, 5))
+    fig, ax = plt.subplots(figsize=(14, 4.5))
     np.random.seed(seed.value)
     _func_type = function_dropdown.value
     X_data, y_data, X_test, y_test = get_data(N_samples.value, sigma=sigma.value, function_type=_func_type)
@@ -1096,7 +1147,11 @@ def _(
         axins.tick_params(labelsize=7)
         axins.grid(True, alpha=0.3, linewidth=0.5)
 
-    mo.center(fig)
+    mo.Html(f'''
+    <div class="app-plot">
+        {mo.center(fig)}
+    </div>
+    ''')
     return
 
 
@@ -1310,9 +1365,9 @@ def _(
         "Non-linear Methods": nonlinear_methods_tab
     })
 
-    # Wrap each column with width allocations: 25% / 25% / 50%
+    # Wrap each column with width allocations
     dataset_column = mo.Html(f'''
-    <div style="width: 25%; min-width: 200px;">
+    <div style="width: 35%; min-width: 200px;">
         {mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed])}
     </div>
     ''')
@@ -1334,7 +1389,7 @@ def _(
     ''')
 
     tabs_column = mo.Html(f'''
-    <div style="width: 50%; min-width: 300px;">
+    <div style="width: 60%; min-width: 300px;">
         {method_params_tabs}
     </div>
     ''')
@@ -1346,7 +1401,7 @@ def _(
     ], gap=0.2)
 
     mo.Html(f'''
-    <div style="background-color: #f8f9fa; padding: 10px; border-radius: 8px; margin-bottom: 10px; min-height: 350px; max-width: 80%; margin-left: auto; margin-right: auto;">
+    <div class="app-dashboard">
         {controls}
     </div>
     ''')
