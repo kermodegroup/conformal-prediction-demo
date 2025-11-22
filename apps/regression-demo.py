@@ -899,6 +899,23 @@ def _(
     _func_type = function_dropdown.value
     X_data, y_data, X_test, y_test = get_data(N_samples.value, sigma=sigma.value, function_type=_func_type)
 
+    # Check if filter removed all data
+    if len(X_data) >= 5:
+        # Proceed with normal plotting
+        pass
+    else:
+        # Show error message and stop
+        ax.text(0.5, 0.5, 'Error: Filter range removed all data!\nAdjust filter range to include some data points.',
+                ha='center', va='center', transform=ax.transAxes, fontsize=14, color='red',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        ax.set_xlim(-10, 10)
+        ax.set_ylim(-1.5, 1.5)
+        ax.set_xlabel('$x$')
+        ax.set_ylabel('$y$')
+        ax.set_title('Error: No data in filtered range')
+        mo.center(fig)
+        mo.stop(True)  # Stop execution
+
     X_train, X_calib, y_train, y_calib = train_test_split(X_data, y_data, test_size=get_calib_frac(), random_state=get_seed())
     n = len(y_calib)
 
