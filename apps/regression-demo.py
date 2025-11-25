@@ -196,7 +196,7 @@ def _(np):
 
         Uses sklearn's MLPRegressor with ensemble for uncertainty estimation
         """
-        def __init__(self, hidden_layer_sizes=(20,), alpha=0.001, n_ensemble=5, max_iter=1000, tol=1e-3):
+        def __init__(self, hidden_layer_sizes=(20,), alpha=0.001, n_ensemble=5, max_iter=1000, tol=1e-3, activation='tanh', ensemble_method='seed'):
             """
             Parameters:
             -----------
@@ -216,31 +216,47 @@ def _(np):
             self.n_ensemble = n_ensemble
             self.max_iter = max_iter
             self.tol = tol
+            self.activation = activation
+            self.ensemble_method = ensemble_method
             self.ensemble_ = []
             self.x_mean_ = None
             self.x_std_ = None
 
         def fit(self, X, y):
-            """Fit ensemble of neural networks with different random initializations"""
+            """Fit ensemble of neural networks using either different seeds or bootstrap"""
             # Standardize inputs for better NN training
             self.x_mean_ = np.mean(X, axis=0, keepdims=True)
             self.x_std_ = np.std(X, axis=0, keepdims=True) + 1e-8  # Avoid division by zero
             X_scaled = (X - self.x_mean_) / self.x_std_
 
-            # Train ensemble with different random seeds
+            # Train ensemble
             self.ensemble_ = []
             for i in range(self.n_ensemble):
+                if self.ensemble_method == 'bootstrap':
+                    # Bootstrap: resample data with replacement
+                    n_samples = len(X_scaled)
+                    indices = np.random.choice(n_samples, size=n_samples, replace=True)
+                    X_boot = X_scaled[indices]
+                    y_boot = y[indices]
+                    # Use same random seed for all bootstrap models
+                    random_state = 42
+                else:
+                    # Random seed: use different random initialization for each model
+                    X_boot = X_scaled
+                    y_boot = y
+                    random_state = i
+
                 model = MLPRegressor(
                     hidden_layer_sizes=self.hidden_layer_sizes,
-                    activation='tanh',
+                    activation=self.activation,
                     solver='lbfgs',
                     alpha=self.alpha,
                     max_iter=self.max_iter,
                     tol=self.tol,
-                    random_state=i,  # Different seed for each ensemble member
+                    random_state=random_state,
                     warm_start=False
                 )
-                model.fit(X_scaled, y)
+                model.fit(X_boot, y_boot)
                 self.ensemble_.append(model)
 
             return self
@@ -285,6 +301,125 @@ def _(np):
 
 
 @app.cell
+def _(np):
+    from sklearn.linear_model import QuantileRegressor
+
+    class QuantileRegressionUQ:
+        """
+        Quantile regression for uncertainty quantification
+
+        Directly predicts prediction intervals by fitting models at different quantiles.
+        Non-parametric approach that doesn't assume a specific distribution.
+        """
+        def __init__(self, confidence=0.9, fit_intercept=False, alpha=1.0):
+            """
+            Parameters:
+            -----------
+            confidence : float, default=0.9
+                Confidence level for prediction intervals (e.g., 0.9 for 90% intervals)
+            fit_intercept : bool, default=False
+                Whether to fit intercept (usually False when using polynomial basis)
+            alpha : float, default=1.0
+                Regularization strength (higher = more regularization)
+            """
+            self.confidence = confidence
+            self.fit_intercept = fit_intercept
+            self.significance = 1 - confidence  # Significance level
+            self.alpha = alpha  # Regularization parameter
+
+            # Three quantile models: lower, median, upper
+            self.model_lower = QuantileRegressor(
+                quantile=self.significance/2,
+                alpha=alpha,
+                solver='highs',
+                fit_intercept=fit_intercept
+            )
+            self.model_median = QuantileRegressor(
+                quantile=0.5,
+                alpha=alpha,
+                solver='highs',
+                fit_intercept=fit_intercept
+            )
+            self.model_upper = QuantileRegressor(
+                quantile=1 - self.significance/2,
+                alpha=alpha,
+                solver='highs',
+                fit_intercept=fit_intercept
+            )
+
+        def fit(self, X, y):
+            """Fit three quantile regression models"""
+            import warnings
+
+            # Suppress convergence warnings and catch fit failures
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore')  # Suppress all warnings during fit
+
+                try:
+                    self.model_lower.fit(X, y)
+                    self.model_median.fit(X, y)
+                    self.model_upper.fit(X, y)
+                    self.fit_succeeded_ = True
+                except Exception as e:
+                    # If fitting fails, mark as failed
+                    # Predictions will fall back to simple mean
+                    self.fit_succeeded_ = False
+                    self.fallback_mean_ = np.mean(y)
+                    self.fallback_std_ = np.std(y)
+
+            return self
+
+        def predict(self, X, return_std=False, aleatoric=False):
+            """
+            Predict using quantile regression
+
+            Parameters:
+            -----------
+            X : array-like
+                Input features
+            return_std : bool, default=False
+                If True, return (predictions, std_deviations)
+            aleatoric : bool, default=False
+                Not used for quantile regression (intervals already include all uncertainty)
+
+            Returns:
+            --------
+            y_pred : array
+                Median predictions
+            y_std : array (if return_std=True)
+                Approximate standard deviation from prediction interval width
+            """
+            # If fitting failed, return fallback predictions
+            if not self.fit_succeeded_:
+                n_samples = X.shape[0]
+                y_pred = np.full(n_samples, self.fallback_mean_)
+                if return_std:
+                    y_std = np.full(n_samples, self.fallback_std_)
+                    return y_pred, y_std
+                return y_pred
+
+            y_pred = self.model_median.predict(X)
+
+            if not return_std:
+                return y_pred
+
+            y_lower = self.model_lower.predict(X)
+            y_upper = self.model_upper.predict(X)
+
+            # Approximate std from interval width
+            # For normal distribution, 90% interval is roughly ±1.645σ
+            # So interval width ≈ 2*1.645σ → σ ≈ width / 3.29
+            # For 95%: width / 3.92, for 80%: width / 2.56
+            from scipy.stats import norm
+            z_score = norm.ppf(1 - self.significance/2)
+            y_std = (y_upper - y_lower) / (2 * z_score)
+
+            return y_pred, y_std
+
+    return (QuantileRegressionUQ,)
+
+
+@app.cell
 def _(cho_factor, cho_solve, np):
     # Pure numpy/scipy GP implementation for WebAssembly compatibility
 
@@ -310,6 +445,14 @@ def _(cho_factor, cho_solve, np):
         K = np.exp(-0.5 * dists_sq / lengthscale**2)
         return K
 
+    def matern_kernel(X1, X2, lengthscale, nu=1.5):
+        """Matérn kernel with nu=1.5 (Matérn-3/2)"""
+        dists = np.abs(X1[:, None] - X2[None, :])
+        r = dists / lengthscale
+        sqrt3_r = np.sqrt(3.0) * r
+        K = (1.0 + sqrt3_r) * np.exp(-sqrt3_r)
+        return K
+
     def compute_kernel_matrix(X1, X2, kernel_type, params):
         """Helper to compute kernel matrix given type and params"""
         if kernel_type == 'bump':
@@ -318,6 +461,8 @@ def _(cho_factor, cho_solve, np):
             return polynomial_kernel(X1, X2, params['degree'], params['sigma'])
         elif kernel_type == 'rbf':
             return rbf_kernel(X1, X2, params['lengthscale'])
+        elif kernel_type == 'matern':
+            return matern_kernel(X1, X2, params['lengthscale'])
         else:
             raise ValueError(f"Unknown kernel type: {kernel_type}")
 
@@ -501,6 +646,33 @@ def _(cho_factor, cho_solve, np):
 
         # Define bounds and parameterization (work in log space for positive params)
         if kernel_type == 'rbf':
+            if use_polynomial_mean and joint_inference:
+                # Optimize: log_lengthscale, log_noise, log_mean_regularization
+                def pack_params(lengthscale, noise, mean_reg):
+                    return np.array([np.log(lengthscale), np.log(noise), np.log(mean_reg)])
+
+                def unpack_params(x):
+                    return {'lengthscale': np.exp(x[0]), 'noise': np.exp(x[1]),
+                           'mean_regularization': np.exp(x[2])}
+
+                x0 = pack_params(initial_params.get('lengthscale', 1.0),
+                               initial_params.get('noise', 0.1),
+                               mean_regularization_strength)
+                bounds = [(-2, 2), (-6, 0), (-6, 1)]  # mean_reg: [0.000001, 10]
+            else:
+                # Optimize: log_lengthscale, log_noise
+                def pack_params(lengthscale, noise):
+                    return np.array([np.log(lengthscale), np.log(noise)])
+
+                def unpack_params(x):
+                    return {'lengthscale': np.exp(x[0]), 'noise': np.exp(x[1])}
+
+                x0 = pack_params(initial_params.get('lengthscale', 1.0),
+                               initial_params.get('noise', 0.1))
+                bounds = [(-2, 2), (-6, 0)]
+
+        elif kernel_type == 'matern':
+            # Same hyperparameters as RBF: lengthscale and noise
             if use_polynomial_mean and joint_inference:
                 # Optimize: log_lengthscale, log_noise, log_mean_regularization
                 def pack_params(lengthscale, noise, mean_reg):
@@ -732,6 +904,15 @@ def _(cho_factor, cho_solve, np):
             K_train = rbf_kernel(X_train, X_train, lengthscale)
             K_test_train = rbf_kernel(X_test, X_train, lengthscale)
             K_test = rbf_kernel(X_test, X_test, lengthscale)
+
+        elif kernel_type == 'matern':
+            lengthscale = kernel_params.get('lengthscale', 1.0)
+            noise = max(noise, 1e-6)
+
+            K_train = matern_kernel(X_train, X_train, lengthscale)
+            K_test_train = matern_kernel(X_test, X_train, lengthscale)
+            K_test = matern_kernel(X_test, X_test, lengthscale)
+
         else:
             raise ValueError(f"Unknown kernel type: {kernel_type}")
 
@@ -912,11 +1093,16 @@ def _(
     get_gp_mean_regularization,
     get_gp_poly_mean_degree,
     get_gp_support_radius,
+    get_last_enabled_method,
+    get_nn_activation,
+    get_nn_ensemble_method,
     get_nn_ensemble_size,
     get_nn_hidden_units,
     get_nn_num_layers,
     get_nn_regularization,
     get_percentile_clipping,
+    get_quantile_confidence,
+    get_quantile_regularization,
     get_seed,
     get_sigma,
     get_zeta,
@@ -929,6 +1115,8 @@ def _(
     plt,
     polynomial_kernel,
     pops,
+    quantile,
+    QuantileRegressionUQ,
     rbf_kernel,
     seed,
     sigma,
@@ -969,11 +1157,12 @@ def _(
     Phi_test = poly.transform(X_test)
     Phi_calib = poly.transform(X_calib)
 
-    b = MyBayesianRidge(fit_intercept=False) 
+    b = MyBayesianRidge(fit_intercept=False)
     # Note: POPS mode selection UI is available but not yet implemented in the library
     # The library currently only supports hypercube sampling mode
     p = POPSRegression(fit_intercept=False, percentile_clipping=get_percentile_clipping(), leverage_percentile=0)
     c = ConformalPrediction(fit_intercept=False)
+    q = QuantileRegressionUQ(confidence=get_quantile_confidence(), fit_intercept=False, alpha=get_quantile_regularization())
 
     ax.plot(X_test[:, 0], y_test, 'k-', label='Truth')
     ax.plot(X_train[:, 0], y_train, 'b.', label='Train')
@@ -985,6 +1174,10 @@ def _(
     bayes_log_ml = 0.0  # Initialize
     gp_sparsity = 0.0  # Initialize GP covariance sparsity
 
+    # Dictionary to store predictions and metrics for each method
+    import time
+    method_predictions = {}  # {label: (y_pred, y_std, fit_time)}
+
     models_to_plot = []
     if bayesian.value:
         models_to_plot.append((b, Phi_train, Phi_test, 'C2', 'Bayesian uncertainty', True))
@@ -992,6 +1185,8 @@ def _(
         models_to_plot.append((c, Phi_train, Phi_test, 'C1', 'Conformal prediction', True))
     if pops.value:
         models_to_plot.append((p, Phi_train, Phi_test, 'C0', 'POPS regression', True))
+    if quantile.value:
+        models_to_plot.append((q, Phi_train, Phi_test, 'C4', 'Quantile regression', True))
     if gp_regression.value:
         models_to_plot.append((None, X_train, X_test, 'C3', 'GP regression', False))
     if neural_network.value:
@@ -1002,6 +1197,9 @@ def _(
             model, X_train_model, X_test_model, color, label, use_poly = model_info
         else:
             continue
+
+        # Start timing for this method
+        start_time = time.time()
 
         if label == 'GP regression':
             # Fit GP with numpy
@@ -1060,7 +1258,9 @@ def _(
             nn = NeuralNetworkRegression(
                 hidden_layer_sizes=hidden_layer_sizes,
                 alpha=10**get_nn_regularization(),  # Convert from log10 scale
-                n_ensemble=get_nn_ensemble_size()
+                n_ensemble=get_nn_ensemble_size(),
+                activation=get_nn_activation(),
+                ensemble_method=get_nn_ensemble_method()
                 # Uses default max_iter=1000, tol=1e-3 for reliable convergence
             )
             nn.fit(X_train_model, y_train)
@@ -1090,6 +1290,10 @@ def _(
             else:
                 y_pred, y_std = model.predict(X_test_model, **kwargs)
 
+        # Store predictions and timing for metrics computation
+        fit_time = time.time() - start_time
+        method_predictions[label] = (y_pred, y_std, fit_time)
+
         ax.plot(X_test[:, 0], y_pred, color=color, lw=3)
         ax.fill_between(X_test[:, 0], y_pred - y_std, y_pred + y_std, alpha=0.5, color=color, label=label)
 
@@ -1107,41 +1311,117 @@ def _(
     # Apply tight_layout before adding inset (to avoid warning)
     plt.tight_layout()
 
-    # Add kernel plot as inset when GP regression is enabled
-    if gp_regression.value:
-        # Create inset axes in the lower right, between x=7.5 and x=10.0
+    # Add inset plot based on most recently enabled method
+    linear_methods_active = bayesian.value or conformal.value or pops.value or quantile.value
+    last_method = get_last_enabled_method()
+
+    # Determine which inset to show based on last enabled method
+    show_gp_inset = last_method == 'gp' and gp_regression.value
+    show_nn_inset = last_method == 'nn' and neural_network.value
+    show_linear_inset = last_method == 'linear' and linear_methods_active
+
+    if show_gp_inset or show_nn_inset or show_linear_inset:
+        # Create inset axes in the lower right
         from mpl_toolkits.axes_grid1.inset_locator import inset_axes
         # Position: [x, y, width, height] in axes coordinates
         axins = inset_axes(ax, width="12%", height="25%", loc='lower right',
                           bbox_to_anchor=(0, 0, 1, 1), bbox_transform=ax.transAxes,
                           borderpad=1.5)
 
-        # Plot kernel function
-        x_kernel = np.linspace(0, 2.0, 100)
-        kernel_type = get_gp_kernel_type()
+        if show_gp_inset:
+            # Plot kernel function
+            x_kernel = np.linspace(0, 2.0, 100)
+            kernel_type = get_gp_kernel_type()
 
-        if kernel_type == 'rbf':
-            K_values = rbf_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale())[0, :]
-        elif kernel_type == 'bump':
-            K_values = bump_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale(), get_gp_support_radius())[0, :]
-            # Add vertical line for support radius
-            axins.axvline(get_gp_support_radius(), color='k', ls='dashed', lw=0.8, alpha=0.5)
-        elif kernel_type == 'polynomial':
-            K_values = polynomial_kernel(np.array([0.0]), x_kernel, get_P(), 1.0)[0, :]
+            if kernel_type == 'rbf':
+                K_values = rbf_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale())[0, :]
+            elif kernel_type == 'bump':
+                K_values = bump_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale(), get_gp_support_radius())[0, :]
+                # Add vertical line for support radius
+                axins.axvline(get_gp_support_radius(), color='k', ls='dashed', lw=0.8, alpha=0.5)
+            elif kernel_type == 'matern':
+                K_values = matern_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale())[0, :]
+            elif kernel_type == 'polynomial':
+                K_values = polynomial_kernel(np.array([0.0]), x_kernel, get_P(), 1.0)[0, :]
 
-        axins.plot(x_kernel, K_values, 'C3', lw=1.5)
-        axins.set_xlabel('$r$', fontsize=8)
-        axins.set_ylabel('$K(0, r)$', fontsize=8)
-        axins.set_title(f'Kernel: {kernel_type}', fontsize=9, pad=3)
-        axins.tick_params(labelsize=7)
-        axins.grid(True, alpha=0.3, linewidth=0.5)
+            axins.plot(x_kernel, K_values, 'C3', lw=1.5)
+            axins.set_xlabel('$r$', fontsize=8)
+            axins.set_ylabel('$K(0, r)$', fontsize=8)
+            axins.set_title(f'Kernel: {kernel_type}', fontsize=9, pad=3)
+            axins.tick_params(labelsize=7)
+            axins.grid(True, alpha=0.3, linewidth=0.5)
+
+        elif show_nn_inset:
+            # Plot activation function
+            x_act = np.linspace(-3, 3, 100)
+            activation_type = get_nn_activation()
+
+            if activation_type == 'tanh':
+                y_act = np.tanh(x_act)
+            elif activation_type == 'relu':
+                y_act = np.maximum(0, x_act)
+
+            axins.plot(x_act, y_act, 'C5', lw=1.5)
+            axins.set_xlabel('$x$', fontsize=8)
+            axins.set_ylabel(f'${activation_type}(x)$', fontsize=8)
+            axins.set_title(f'Activation: {activation_type}', fontsize=9, pad=3)
+            axins.tick_params(labelsize=7)
+            axins.grid(True, alpha=0.3, linewidth=0.5)
+            axins.axhline(0, color='k', lw=0.5, alpha=0.3)
+            axins.axvline(0, color='k', lw=0.5, alpha=0.3)
+
+        elif show_linear_inset:
+            # Plot all polynomial basis functions
+            x_basis = np.linspace(-1, 1, 100)
+            P_degree = get_P()
+
+            # Use colormap for varying colors
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap('viridis')
+            colors = [cmap(i / P_degree) for i in range(P_degree + 1)]
+
+            for i in range(P_degree + 1):
+                y_basis = x_basis ** i
+                # Use thinner lines for higher degrees to reduce clutter
+                lw = 1.2 if i < 4 else 0.8
+                alpha = 0.8 if i < 4 else 0.5
+                axins.plot(x_basis, y_basis, color=colors[i], lw=lw, alpha=alpha)
+
+            axins.set_xlabel('$x$', fontsize=8)
+            axins.set_ylabel('Basis', fontsize=8)
+            axins.set_title(f'Polynomial basis (P={P_degree})', fontsize=9, pad=3)
+            axins.tick_params(labelsize=7)
+            axins.grid(True, alpha=0.3, linewidth=0.5)
+            # Add text labels for first and last basis
+            axins.text(0.95, 0.05, '$x^0$', transform=axins.transAxes, fontsize=6, ha='right', va='bottom')
+            axins.text(0.95, 0.95, f'$x^{{{P_degree}}}$', transform=axins.transAxes, fontsize=6, ha='right', va='top')
+
+    # Compute metrics for all active methods
+    metrics_dict = {}
+    for method_label, (method_y_pred, method_y_std, method_fit_time) in method_predictions.items():
+        # Coverage: % of test points within predicted intervals
+        method_in_interval = np.abs(y_test - method_y_pred) <= method_y_std
+        method_coverage = 100.0 * np.mean(method_in_interval)
+
+        # Mean interval width (sharpness)
+        method_mean_width = np.mean(2 * method_y_std)
+
+        # MSE (accuracy)
+        method_mse = np.mean((y_test - method_y_pred) ** 2)
+
+        metrics_dict[method_label] = {
+            'coverage': method_coverage,
+            'mean_width': method_mean_width,
+            'mse': method_mse,
+            'fit_time': method_fit_time
+        }
 
     mo.Html(f'''
     <div class="app-plot">
         {mo.center(fig)}
     </div>
     ''')
-    return (bayes_log_ml, n, qhat, gp_log_ml, gp_sparsity)
+    return (bayes_log_ml, n, qhat, gp_log_ml, gp_sparsity, metrics_dict)
 
 
 @app.cell(hide_code=True)
@@ -1157,11 +1437,15 @@ def _(
     get_gp_kernel_type,
     get_gp_mean_regularization,
     get_gp_poly_mean_degree,
+    get_nn_activation,
+    get_nn_ensemble_method,
     get_nn_ensemble_size,
     get_nn_hidden_units,
     get_nn_num_layers,
     get_nn_regularization,
     get_percentile_clipping,
+    get_quantile_confidence,
+    get_quantile_regularization,
     get_seed,
     get_sigma,
     get_zeta,
@@ -1172,6 +1456,7 @@ def _(
     neural_network,
     np,
     pops,
+    quantile,
     set_N_samples,
     set_P,
     set_calib_frac,
@@ -1184,11 +1469,15 @@ def _(
     set_gp_mean_regularization,
     set_gp_poly_mean_degree,
     set_gp_support_radius,
+    set_nn_activation,
+    set_nn_ensemble_method,
     set_nn_ensemble_size,
     set_nn_hidden_units,
     set_nn_num_layers,
     set_nn_regularization,
     set_percentile_clipping,
+    set_quantile_confidence,
+    set_quantile_regularization,
     set_seed,
     set_sigma,
     set_zeta,
@@ -1223,12 +1512,12 @@ def _(
     )
 
     # Regression parameters with conditional styling
-    reg_enabled = bayesian.value or conformal.value or pops.value
+    reg_enabled = bayesian.value or conformal.value or pops.value or quantile.value
 
     if reg_enabled:
         # Use fixed default value (not state) to avoid circular dependency
         # Manual slider changes still update state via on_change, but slider doesn't react to state changes
-        P_slider = mo.ui.slider(5, 15, 1, 10, label="Fit parameters $P$", on_change=set_P)
+        P_slider = mo.ui.slider(5, 15, 1, 10, label="Degree $P$", on_change=set_P)
         P_elem = P_slider  # For display
         aleatoric = mo.ui.checkbox(False, label="Include aleatoric uncertainty")
         reg_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>")
@@ -1254,11 +1543,19 @@ def _(
     else:
         percentile_clipping = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0, 10, 1, get_percentile_clipping(), label='Percentile clipping', disabled=True, on_change=set_percentile_clipping)}</div>")
 
+    # Quantile regression section with conditional styling
+    if quantile.value:
+        quantile_confidence = mo.ui.slider(0.80, 0.95, 0.05, get_quantile_confidence(), label="Confidence level", on_change=set_quantile_confidence)
+        quantile_regularization = mo.ui.slider(0.0, 0.1, 0.001, get_quantile_regularization(), label="Regularization", on_change=set_quantile_regularization)
+    else:
+        quantile_confidence = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.80, 0.95, 0.05, get_quantile_confidence(), label='Confidence level', disabled=True, on_change=set_quantile_confidence)}</div>")
+        quantile_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.0, 0.1, 0.001, get_quantile_regularization(), label='Regularization', disabled=True, on_change=set_quantile_regularization)}</div>")
+
     # GP regression section with conditional styling
     if gp_regression.value:
         aleatoric_gp = mo.ui.checkbox(False, label="Include aleatoric uncertainty")
         gp_kernel_dropdown = mo.ui.dropdown(
-            options=['rbf', 'polynomial', 'bump'],
+            options=['rbf', 'matern', 'bump'],
             value=get_gp_kernel_type(),
             label='Kernel type',
             on_change=set_gp_kernel_type
@@ -1294,7 +1591,7 @@ def _(
     else:
         aleatoric_gp = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Include aleatoric uncertainty', disabled=True)}</div>")
         # Dropdown doesn't have disabled attribute, just show greyed out
-        gp_kernel_dropdown = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{mo.ui.dropdown(['bump', 'polynomial', 'rbf'], value='bump', label='Kernel type')}</div>")
+        gp_kernel_dropdown = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{mo.ui.dropdown(['rbf', 'matern', 'bump'], value='rbf', label='Kernel type')}</div>")
         gp_lengthscale_slider = None  # No slider when disabled
         gp_support_radius_slider = None  # No slider when disabled
         gp_lengthscale = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.1, 5.0, 0.1, 0.5, label='Lengthscale', disabled=True)}</div>")
@@ -1309,43 +1606,97 @@ def _(
 
     # Neural network section with conditional styling
     if neural_network.value:
+        nn_activation = mo.ui.dropdown(
+            options=['tanh', 'relu'],
+            value=get_nn_activation(),
+            label='Activation function',
+            on_change=set_nn_activation
+        )
+        nn_ensemble_method = mo.ui.dropdown(
+            options=['seed', 'bootstrap'],
+            value=get_nn_ensemble_method(),
+            label='Ensemble method',
+            on_change=set_nn_ensemble_method
+        )
         nn_hidden_units = mo.ui.slider(5, 50, 5, get_nn_hidden_units(), label='Hidden units', on_change=set_nn_hidden_units)
         nn_num_layers = mo.ui.slider(1, 3, 1, get_nn_num_layers(), label='Hidden layers', on_change=set_nn_num_layers)
         _log_reg_nn = get_nn_regularization()
         nn_regularization = mo.ui.slider(-6, 0, 0.5, _log_reg_nn, label='Regularization (log₁₀)', on_change=set_nn_regularization)
         nn_ensemble_size = mo.ui.slider(3, 10, 1, get_nn_ensemble_size(), label='Ensemble size', on_change=set_nn_ensemble_size)
     else:
+        nn_activation = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{mo.ui.dropdown(['tanh'], value='tanh', label='Activation function')}</div>")
+        nn_ensemble_method = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{mo.ui.dropdown(['seed', 'bootstrap'], value='seed', label='Ensemble method')}</div>")
         nn_hidden_units = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 50, 5, get_nn_hidden_units(), label='Hidden units', disabled=True)}</div>")
         nn_num_layers = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(1, 3, 1, get_nn_num_layers(), label='Hidden layers', disabled=True)}</div>")
         nn_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 0, 0.5, -3, label='Regularization (log₁₀)', disabled=True)}</div>")
         nn_ensemble_size = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(3, 10, 1, 5, label='Ensemble size', disabled=True)}</div>")
 
-    # Create tab content for each method category
-    # Keep CP and POPS labels for clarity
-    if conformal.value:
-        cp_label_elem = mo.md("**Conformal prediction**")
+    # Linear Methods tab: Two-column layout
+    # First column: Shared settings, Bayesian fit, and Quantile regression
+    if reg_enabled:
+        shared_label = mo.md("*Shared settings:*")
     else:
-        cp_label_elem = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>Conformal prediction</p>")
+        shared_label = mo.md("*Shared settings (enable a method below):*")
 
-    if pops.value:
-        pops_label_elem = mo.md("**POPS regression**")
-    else:
-        pops_label_elem = mo.Html("<p style='color: #d0d0d0; font-weight: bold;'>POPS regression</p>")
-
-    linear_methods_tab = mo.vstack([
-        P_elem, aleatoric, reg_separator,
-        cp_label_elem, calib_frac, zeta, cp_separator,
-        pops_label_elem, percentile_clipping
+    linear_col1 = mo.vstack([
+        shared_label,
+        P_elem, aleatoric,
+        mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd;'>"),
+        mo.left(bayesian),
+        mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>"),
+        mo.left(quantile),
+        quantile_confidence,
+        quantile_regularization
     ])
 
-    kernel_methods_tab = mo.vstack([
+    # Second column: Conformal Prediction and POPS regression
+    linear_col2 = mo.vstack([
+        mo.left(conformal),
+        calib_frac, zeta, cp_separator,
+        mo.left(pops),
+        percentile_clipping
+    ])
+
+    linear_methods_tab = mo.Html(f'''
+    <div style="display: flex; gap: 20px;">
+        <div style="width: 50%; min-width: 200px;">
+            {linear_col1}
+        </div>
+        <div style="width: 50%; min-width: 200px;">
+            {linear_col2}
+        </div>
+    </div>
+    ''')
+
+    # Kernel Methods tab: Two-column layout
+    kernel_col1 = mo.vstack([
+        mo.left(gp_regression),
         aleatoric_gp,
         gp_kernel_dropdown, gp_lengthscale, gp_support_radius,
-        gp_opt_button_elem, gp_separator, gp_use_poly_mean_elem,
+        gp_opt_button_elem
+    ])
+
+    kernel_col2 = mo.vstack([
+        gp_use_poly_mean_elem,
         gp_poly_mean_degree, gp_joint_inference, gp_mean_regularization
     ])
 
+    kernel_methods_tab = mo.Html(f'''
+    <div style="display: flex; gap: 20px;">
+        <div style="width: 50%; min-width: 200px;">
+            {kernel_col1}
+        </div>
+        <div style="width: 50%; min-width: 200px;">
+            {kernel_col2}
+        </div>
+    </div>
+    ''')
+
+    # Non-linear Methods tab: Single column with checkbox at top
     nonlinear_methods_tab = mo.vstack([
+        mo.left(neural_network),
+        nn_activation,
+        nn_ensemble_method,
         nn_hidden_units, nn_num_layers,
         nn_regularization, nn_ensemble_size
     ])
@@ -1357,38 +1708,21 @@ def _(
         "Non-linear Methods": nonlinear_methods_tab
     })
 
-    # Wrap each column with width allocations
+    # Two-column layout: Dataset parameters on left, Tabs on right
     dataset_column = mo.Html(f'''
-    <div style="width: 35%; min-width: 200px;">
+    <div style="width: 30%; min-width: 200px;">
         {mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed])}
     </div>
     ''')
 
-    # Create analysis methods column with fixed height to prevent jumping
-    analysis_methods_column = mo.Html(f'''
-    <div style="width: 25%; min-width: 180px; min-height: 360px; display: flex; flex-direction: column;">
-        {mo.vstack([
-            mo.md("**Analysis Methods**"),
-            mo.left(bayesian),
-            mo.left(conformal),
-            mo.left(pops),
-            mo.md("**Kernel Methods**"),
-            mo.left(gp_regression),
-            mo.md("**Non-linear Methods**"),
-            mo.left(neural_network),
-        ])}
-    </div>
-    ''')
-
     tabs_column = mo.Html(f'''
-    <div style="width: 60%; min-width: 300px;">
+    <div style="width: 70%; min-width: 400px;">
         {method_params_tabs}
     </div>
     ''')
 
     controls = mo.hstack([
         dataset_column,
-        analysis_methods_column,
         tabs_column
     ], gap=0.2)
 
@@ -1410,7 +1744,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(bayes_log_ml, bayesian, conformal, gp_log_ml, gp_optimize_button, gp_regression, gp_sparsity, mo, n, opt_message, qhat):
+def _(bayes_log_ml, bayesian, conformal, gp_log_ml, gp_optimize_button, gp_regression, gp_sparsity, metrics_dict, mo, n, opt_message, qhat):
     # Display computed outputs below the dashboard (only values not in sliders)
     output_items = []
 
@@ -1435,6 +1769,8 @@ def _(bayes_log_ml, bayesian, conformal, gp_log_ml, gp_optimize_button, gp_regre
                     output_items.append(f"Opt lengthscale: {opt_message['lengthscale']:.3f}")
                 if opt_message.get('support_radius') is not None:
                     output_items.append(f"Opt support: {opt_message['support_radius']:.3f}")
+                if opt_message.get('noise') is not None:
+                    output_items.append(f"Opt noise: {opt_message['noise']:.4f}")
                 if opt_message.get('mean_reg') is not None:
                     output_items.append(f"Opt mean reg: {opt_message['mean_reg']:.4f}")
         else:
@@ -1444,27 +1780,79 @@ def _(bayes_log_ml, bayesian, conformal, gp_log_ml, gp_optimize_button, gp_regre
         output_items.append(f"Sparsity: {gp_sparsity:.1f}%")
 
     # Display outputs
+    output_html = ""
     if output_items:
         outputs_text = " | ".join(output_items)
-        result = mo.Html(f'''
+        output_html = f'''
         <div style="background-color: #e8f4f8; padding: 8px 15px; border-radius: 5px; margin: 0 auto 10px auto; max-width: 90%; text-align: center; font-size: 14px;">
             <b>Outputs:</b> {outputs_text}
         </div>
-        ''')
-    else:
-        result = mo.md("")
+        '''
 
+    # Display metrics table
+    metrics_html = ""
+    if metrics_dict:
+        # Create table rows
+        rows = []
+        for method_name, method_metrics in metrics_dict.items():
+            cov_pct = method_metrics['coverage']
+            # Color code coverage: green if >85%, yellow if 70-85%, red if <70%
+            if cov_pct >= 85:
+                coverage_color = "#28a745"  # green
+            elif cov_pct >= 70:
+                coverage_color = "#ffc107"  # yellow
+            else:
+                coverage_color = "#dc3545"  # red
+
+            rows.append(f'''
+            <tr>
+                <td style="text-align: left; padding: 5px 10px;"><b>{method_name}</b></td>
+                <td style="text-align: center; padding: 5px 10px; color: {coverage_color};"><b>{cov_pct:.1f}%</b></td>
+                <td style="text-align: center; padding: 5px 10px;">{method_metrics['mean_width']:.3f}</td>
+                <td style="text-align: center; padding: 5px 10px;">{method_metrics['mse']:.4f}</td>
+                <td style="text-align: center; padding: 5px 10px;">{method_metrics['fit_time']*1000:.1f} ms</td>
+            </tr>
+            ''')
+
+        metrics_html = f'''
+        <div style="background-color: #f8f9fa; padding: 10px 15px; border-radius: 5px; margin: 0 auto 10px auto; max-width: 90%;">
+            <div style="text-align: center; font-size: 14px; margin-bottom: 8px;"><b>Performance Metrics</b></div>
+            <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                <thead>
+                    <tr style="border-bottom: 2px solid #dee2e6;">
+                        <th style="text-align: left; padding: 5px 10px;">Method</th>
+                        <th style="text-align: center; padding: 5px 10px;">Coverage</th>
+                        <th style="text-align: center; padding: 5px 10px;">Interval Width</th>
+                        <th style="text-align: center; padding: 5px 10px;">MSE</th>
+                        <th style="text-align: center; padding: 5px 10px;">Fit Time</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {''.join(rows)}
+                </tbody>
+            </table>
+        </div>
+        '''
+
+    result = mo.Html(output_html + metrics_html)
     result
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    bayesian = mo.ui.checkbox(False, label="Bayesian fit")
-    conformal = mo.ui.checkbox(False, label="Conformal prediction")
-    pops = mo.ui.checkbox(False, label="POPS regression")
-    gp_regression = mo.ui.checkbox(False, label="GP regression")
-    neural_network = mo.ui.checkbox(False, label="Neural network")
+def _(mo, set_last_enabled_method):
+    bayesian = mo.ui.checkbox(False, label="<b>Bayesian fit</b>",
+                               on_change=lambda v: set_last_enabled_method('linear') if v else None)
+    conformal = mo.ui.checkbox(False, label="<b>Conformal prediction</b>",
+                                on_change=lambda v: set_last_enabled_method('linear') if v else None)
+    pops = mo.ui.checkbox(False, label="<b>POPS regression</b>",
+                          on_change=lambda v: set_last_enabled_method('linear') if v else None)
+    quantile = mo.ui.checkbox(False, label="<b>Quantile regression</b>",
+                              on_change=lambda v: set_last_enabled_method('linear') if v else None)
+    gp_regression = mo.ui.checkbox(False, label="<b>GP regression</b>",
+                                    on_change=lambda v: set_last_enabled_method('gp') if v else None)
+    neural_network = mo.ui.checkbox(False, label="<b>Neural network</b>",
+                                     on_change=lambda v: set_last_enabled_method('nn') if v else None)
     gp_use_poly_mean = mo.ui.checkbox(False, label="Use polynomial mean function")
     return (
         bayesian,
@@ -1473,6 +1861,7 @@ def _(mo):
         gp_use_poly_mean,
         neural_network,
         pops,
+        quantile,
     )
 
 
@@ -1498,7 +1887,7 @@ def _(mo):
     get_percentile_clipping, set_percentile_clipping = mo.state(0)
 
     # GP-specific state
-    get_gp_kernel_type, set_gp_kernel_type = mo.state('bump')
+    get_gp_kernel_type, set_gp_kernel_type = mo.state('rbf')
     get_gp_lengthscale, set_gp_lengthscale = mo.state(0.5)
     get_gp_support_radius, set_gp_support_radius = mo.state(1.5)
     # gp_use_poly_mean is now a simple checkbox without state (created in analysis checkboxes cell)
@@ -1507,14 +1896,23 @@ def _(mo):
     get_gp_mean_regularization, set_gp_mean_regularization = mo.state(0.1)
 
     # Neural network-specific state
+    get_nn_activation, set_nn_activation = mo.state('tanh')
+    get_nn_ensemble_method, set_nn_ensemble_method = mo.state('seed')
     get_nn_hidden_units, set_nn_hidden_units = mo.state(20)
     get_nn_num_layers, set_nn_num_layers = mo.state(1)
     get_nn_regularization, set_nn_regularization = mo.state(-3)  # log10 scale
     get_nn_ensemble_size, set_nn_ensemble_size = mo.state(5)
 
+    # Quantile regression-specific state
+    get_quantile_confidence, set_quantile_confidence = mo.state(0.9)
+    get_quantile_regularization, set_quantile_regularization = mo.state(0.01)
+
     # Button click count tracking to prevent infinite loops
     get_bayes_opt_count, set_bayes_opt_count = mo.state(0)
     get_gp_opt_count, set_gp_opt_count = mo.state(0)
+
+    # Track last enabled method for inset display
+    get_last_enabled_method, set_last_enabled_method = mo.state('linear')
     return (
         get_N_samples,
         get_P,
@@ -1615,6 +2013,7 @@ def _(
         opt_lengthscale = None  # Initialize variables used in output formatting
         opt_support = None
         opt_mean_reg = None
+        opt_noise = None
 
         try:
             optimized_params, log_ml = optimize_gp_hyperparameters(
@@ -1641,11 +2040,15 @@ def _(
                 opt_mean_reg = np.clip(optimized_params['mean_regularization'], 1e-6, 10.0)
                 set_gp_mean_regularization(float(opt_mean_reg))
 
+            if 'noise' in optimized_params:
+                opt_noise = optimized_params['noise']
+
             # Store optimized parameters for display in output cell
             opt_message = {
                 'lengthscale': float(opt_lengthscale) if opt_lengthscale is not None else None,
                 'support_radius': float(opt_support) if opt_support is not None else None,
                 'mean_reg': float(opt_mean_reg) if opt_mean_reg is not None else None,
+                'noise': float(opt_noise) if opt_noise is not None else None,
                 'log_ml': float(log_ml)
             }
         except Exception as e:
