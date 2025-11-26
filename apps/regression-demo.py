@@ -162,6 +162,57 @@ def _(BayesianRidge, np):
             else:
                 return 0.0
 
+        def loo_log_likelihood(self, X, y, aleatoric=False):
+            """
+            Compute Leave-One-Out cross-validation log likelihood (per point average).
+
+            Uses efficient closed-form formula without refitting.
+            LOO residual: e_i / (1 - h_ii)
+            LOO variance: σ²_pred_i / (1 - h_ii)
+
+            Parameters:
+            -----------
+            X : array (n, p) - design matrix (same as used for fitting)
+            y : array (n,) - target values
+            aleatoric : bool - include aleatoric noise in variance
+
+            Returns:
+            --------
+            float - average LOO log likelihood per point
+            """
+            if not hasattr(self, 'coef_'):
+                raise ValueError("Model must be fitted first")
+
+            n = len(y)
+            y_pred = X @ self.coef_
+
+            # Predictive variance at each training point (epistemic only)
+            # Σ_pred = X @ Σ_post @ X.T, we need diagonal
+            pred_var = np.sum((X @ self.sigma_) * X, axis=1)
+
+            # Add aleatoric noise variance
+            noise_var = 1.0 / self.alpha_
+            if aleatoric:
+                pred_var = pred_var + noise_var
+
+            # Leverage (hat matrix diagonal): h_ii = x_i @ Σ_post @ x_i.T * alpha
+            # This represents the influence of each point on its own prediction
+            h = np.sum((X @ self.sigma_) * X, axis=1) * self.alpha_
+
+            # Clamp h to avoid division by zero (should be < 1 for valid models)
+            h = np.clip(h, 0, 0.999)
+
+            # LOO residuals and variances
+            residuals = y - y_pred
+            loo_residuals = residuals / (1 - h)
+            loo_var = (pred_var + noise_var) / (1 - h)
+
+            # Gaussian log likelihood
+            loo_var = np.maximum(loo_var, 1e-10)
+            log_lik = -0.5 * (np.log(2 * np.pi * loo_var) + loo_residuals**2 / loo_var)
+
+            return np.mean(log_lik)
+
     class ConformalPrediction(MyBayesianRidge):
         def get_scores(self, X, y, aleatoric=False):
             y_pred, y_std = self.predict(X, return_std=True, rescale=False, aleatoric=aleatoric)
@@ -297,6 +348,25 @@ def _(np):
                 return y_pred, y_std
             else:
                 return y_pred
+
+        def predict_ensemble(self, X):
+            """
+            Return predictions from all ensemble members for CRPS computation.
+
+            Parameters:
+            -----------
+            X : array-like
+                Input data
+
+            Returns:
+            --------
+            ensemble_predictions : array (n_samples, n_ensemble)
+                Predictions from each ensemble member
+            """
+            X_scaled = (X - self.x_mean_) / self.x_std_
+            predictions = np.array([model.predict(X_scaled) for model in self.ensemble_])
+            # Transpose to get shape (n_samples, n_ensemble)
+            return predictions.T
     return (NeuralNetworkRegression,)
 
 
@@ -416,6 +486,29 @@ def _(np):
 
             return y_pred, y_std
 
+        def predict_quantiles(self, X):
+            """
+            Return the raw quantile predictions for CRPS computation.
+
+            Returns:
+            --------
+            y_lower : array - lower quantile predictions
+            y_median : array - median predictions
+            y_upper : array - upper quantile predictions
+            alpha : float - significance level (1 - confidence)
+            """
+            if not self.fit_succeeded_:
+                n_samples = X.shape[0]
+                return (np.full(n_samples, self.fallback_mean_),
+                        np.full(n_samples, self.fallback_mean_),
+                        np.full(n_samples, self.fallback_mean_),
+                        self.significance)
+
+            y_lower = self.model_lower.predict(X)
+            y_median = self.model_median.predict(X)
+            y_upper = self.model_upper.predict(X)
+
+            return y_lower, y_median, y_upper, self.significance
     return (QuantileRegressionUQ,)
 
 
@@ -608,6 +701,58 @@ def _(cho_factor, cho_solve, np):
         y_std = np.sqrt(y_var)
 
         return y_mean, y_std
+
+    def gp_loo_log_likelihood(y_train, K_train, noise):
+        """
+        Compute Leave-One-Out cross-validation log likelihood for GP (per point average).
+
+        Uses efficient closed-form formula:
+        - α = K^{-1} y
+        - K_inv_ii = diagonal of K^{-1}
+        - LOO mean: μ_i = y_i - α_i / K_inv_ii
+        - LOO variance: σ²_i = 1 / K_inv_ii
+
+        Parameters:
+        -----------
+        y_train : array (n,) - training targets
+        K_train : array (n, n) - kernel matrix on training data
+        noise : float - observation noise variance
+
+        Returns:
+        --------
+        float - average LOO log likelihood per point
+        """
+        n = len(y_train)
+
+        # Add noise to kernel
+        K_noisy = K_train + noise * np.eye(n)
+
+        try:
+            # Compute K^{-1} and K^{-1}y
+            L, lower = cho_factor(K_noisy, lower=True)
+            alpha = cho_solve((L, lower), y_train)
+
+            # Compute diagonal of K^{-1}
+            K_inv = cho_solve((L, lower), np.eye(n))
+            K_inv_diag = np.diag(K_inv)
+
+            # Ensure positive diagonal (numerical stability)
+            K_inv_diag = np.maximum(K_inv_diag, 1e-10)
+
+            # LOO predictions
+            loo_mean = y_train - alpha / K_inv_diag
+            loo_var = 1.0 / K_inv_diag
+
+            # LOO residuals
+            loo_residuals = y_train - loo_mean
+
+            # Gaussian log likelihood
+            log_lik = -0.5 * (np.log(2 * np.pi * loo_var) + loo_residuals**2 / loo_var)
+
+            return np.mean(log_lik)
+
+        except np.linalg.LinAlgError:
+            return -np.inf
 
     def optimize_gp_hyperparameters(X_train, y_train, kernel_type, initial_params, max_iter=50,
                                      use_polynomial_mean=False, poly_degree=None, joint_inference=False,
@@ -1016,10 +1161,124 @@ def _(cho_factor, cho_solve, np):
         bump_kernel,
         compute_kernel_matrix,
         fit_gp_numpy,
+        gp_loo_log_likelihood,
         gp_marginal_likelihood,
+        matern_kernel,
         optimize_gp_hyperparameters,
         polynomial_kernel,
         rbf_kernel,
+    )
+
+
+@app.cell
+def _(np):
+    """Helper functions for probabilistic metrics: Log Likelihood and CRPS"""
+    from scipy.stats import norm
+
+    def gaussian_log_likelihood_per_point(y_true, mu, sigma):
+        """
+        Compute average log likelihood per data point for Gaussian predictions.
+
+        Parameters:
+        -----------
+        y_true : array - true values
+        mu : array - predicted means
+        sigma : array - predicted standard deviations
+
+        Returns:
+        --------
+        float - average log likelihood per point
+        """
+        # Avoid log(0) by clamping sigma
+        sigma = np.maximum(sigma, 1e-10)
+        log_lik = -0.5 * (np.log(2 * np.pi * sigma**2) + (y_true - mu)**2 / sigma**2)
+        return np.mean(log_lik)
+
+    def crps_gaussian(y_true, mu, sigma):
+        """
+        Continuous Ranked Probability Score for Gaussian predictions (closed form).
+
+        Lower CRPS is better (0 is perfect).
+
+        Parameters:
+        -----------
+        y_true : array - true values
+        mu : array - predicted means
+        sigma : array - predicted standard deviations
+
+        Returns:
+        --------
+        float - mean CRPS
+        """
+        sigma = np.maximum(sigma, 1e-10)
+        z = (y_true - mu) / sigma
+        crps = sigma * (z * (2 * norm.cdf(z) - 1) + 2 * norm.pdf(z) - 1 / np.sqrt(np.pi))
+        return np.mean(crps)
+
+    def crps_quantile_approx(y_true, y_lower, y_median, y_upper, alpha):
+        """
+        Approximate CRPS using pinball losses at 3 quantiles.
+
+        For quantile regression which doesn't output a full distribution.
+
+        Parameters:
+        -----------
+        y_true : array - true values
+        y_lower : array - lower quantile predictions (alpha/2)
+        y_median : array - median predictions (0.5)
+        y_upper : array - upper quantile predictions (1 - alpha/2)
+        alpha : float - significance level (e.g., 0.1 for 90% intervals)
+
+        Returns:
+        --------
+        float - approximate mean CRPS
+        """
+        # Pinball loss for lower quantile (alpha/2)
+        tau_low = alpha / 2
+        err_low = y_true - y_lower
+        pinball_low = np.where(err_low >= 0, tau_low * err_low, (tau_low - 1) * err_low)
+
+        # Pinball loss for median (0.5)
+        err_med = y_true - y_median
+        pinball_med = np.abs(err_med) * 0.5
+
+        # Pinball loss for upper quantile (1 - alpha/2)
+        tau_high = 1 - alpha / 2
+        err_high = y_true - y_upper
+        pinball_high = np.where(err_high >= 0, tau_high * err_high, (tau_high - 1) * err_high)
+
+        # Average pinball losses as CRPS approximation
+        return np.mean(pinball_low + pinball_med + pinball_high) / 3
+
+    def crps_ensemble(y_true, ensemble_predictions):
+        """
+        CRPS using empirical distribution from ensemble members.
+
+        Parameters:
+        -----------
+        y_true : array (n_samples,) - true values
+        ensemble_predictions : array (n_samples, n_members) - predictions from each ensemble member
+
+        Returns:
+        --------
+        float - mean CRPS
+        """
+        n_samples = len(y_true)
+        crps_values = np.zeros(n_samples)
+
+        for i in range(n_samples):
+            y = y_true[i]
+            preds = ensemble_predictions[i]
+            # CRPS = E|X - y| - 0.5 * E|X - X'|
+            # where X, X' are independent draws from the forecast distribution
+            crps_values[i] = np.mean(np.abs(preds - y)) - 0.5 * np.mean(np.abs(preds[:, None] - preds[None, :]))
+
+        return np.mean(crps_values)
+    return (
+        crps_ensemble,
+        crps_gaussian,
+        crps_quantile_approx,
+        gaussian_log_likelihood_per_point,
     )
 
 
@@ -1073,16 +1332,20 @@ def _(
     NeuralNetworkRegression,
     POPSRegression,
     PolynomialFeatures,
+    QuantileRegressionUQ,
     aleatoric,
     aleatoric_gp,
     bayesian,
     bump_kernel,
     compute_kernel_matrix,
     conformal,
+    crps_ensemble,
+    crps_gaussian,
+    crps_quantile_approx,
     fit_gp_numpy,
     function_dropdown,
     g,
-    get_N_samples,
+    gaussian_log_likelihood_per_point,
     get_P,
     get_calib_frac,
     get_filter_max,
@@ -1104,11 +1367,12 @@ def _(
     get_quantile_confidence,
     get_quantile_regularization,
     get_seed,
-    get_sigma,
     get_zeta,
+    gp_loo_log_likelihood,
     gp_marginal_likelihood,
     gp_regression,
     gp_use_poly_mean,
+    matern_kernel,
     mo,
     neural_network,
     np,
@@ -1116,7 +1380,6 @@ def _(
     polynomial_kernel,
     pops,
     quantile,
-    QuantileRegressionUQ,
     rbf_kernel,
     seed,
     sigma,
@@ -1319,10 +1582,18 @@ def _(
 
         if label == 'POPS regression':
             # POPS: use min/max bounds for coverage
-            method_predictions[label] = (y_pred, y_std, fit_time, y_min, y_max, y_min_train, y_max_train, y_min_calib, y_max_calib)
+            # POPS is external, may not have LOO method
+            extra_data = {}
+            if hasattr(model, 'loo_log_likelihood'):
+                extra_data['loo_log_lik'] = model.loo_log_likelihood(Phi_train, y_train, aleatoric=aleatoric.value)
+            method_predictions[label] = (y_pred, y_std, fit_time, y_min, y_max, y_min_train, y_max_train, y_min_calib, y_max_calib, extra_data)
         elif label == 'Conformal prediction':
             # Conformal: use min/max bounds for coverage (already computed above)
-            method_predictions[label] = (y_pred, y_std, fit_time, y_min, y_max, y_min_train, y_max_train, y_min_calib, y_max_calib)
+            # Conformal inherits from MyBayesianRidge, has LOO method
+            extra_data = {}
+            if hasattr(model, 'loo_log_likelihood'):
+                extra_data['loo_log_lik'] = model.loo_log_likelihood(Phi_train, y_train, aleatoric=aleatoric.value)
+            method_predictions[label] = (y_pred, y_std, fit_time, y_min, y_max, y_min_train, y_max_train, y_min_calib, y_max_calib, extra_data)
         elif label == 'GP regression':
             # GP: get std at train/calib points
             y_pred_train, y_std_train = fit_gp_numpy(
@@ -1345,17 +1616,33 @@ def _(
             if aleatoric_gp.value:
                 y_std_train = np.sqrt(y_std_train**2 + sigma.value**2)
                 y_std_calib = np.sqrt(y_std_calib**2 + sigma.value**2)
-            method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib)
+            # Compute LOO for GP using K_train computed earlier
+            gp_loo = gp_loo_log_likelihood(y_train, K_train, sigma.value**2)
+            extra_data = {'loo_log_lik': gp_loo}
+            method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib, extra_data)
         elif label == 'Neural network':
             # NN: get std at train/calib points
             y_pred_train, y_std_train = nn.predict(X_train, return_std=True)
             y_pred_calib, y_std_calib = nn.predict(X_calib, return_std=True)
-            method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib)
-        else:
-            # Polynomial-basis methods: get std at train/calib points (with aleatoric if enabled)
+            # Store ensemble predictions for CRPS computation
+            extra_data = {'ensemble_preds': nn.predict_ensemble(X_test_model)}
+            method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib, extra_data)
+        elif label == 'Quantile regression':
+            # Quantile regression: store quantile predictions for CRPS
             y_pred_train, y_std_train = model.predict(Phi_train, return_std=True, aleatoric=aleatoric.value)
             y_pred_calib, y_std_calib = model.predict(Phi_calib, return_std=True, aleatoric=aleatoric.value)
-            method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib)
+            y_lower, y_median, y_upper, q_alpha = model.predict_quantiles(X_test_model)
+            extra_data = {'y_lower': y_lower, 'y_median': y_median, 'y_upper': y_upper, 'alpha': q_alpha}
+            method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib, extra_data)
+        else:
+            # Other polynomial-basis methods (Bayesian, POPS, Conformal): Gaussian distribution
+            y_pred_train, y_std_train = model.predict(Phi_train, return_std=True, aleatoric=aleatoric.value)
+            y_pred_calib, y_std_calib = model.predict(Phi_calib, return_std=True, aleatoric=aleatoric.value)
+            # Compute LOO for methods that support it
+            extra_data = {}
+            if hasattr(model, 'loo_log_likelihood'):
+                extra_data['loo_log_lik'] = model.loo_log_likelihood(Phi_train, y_train, aleatoric=aleatoric.value)
+            method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib, extra_data)
 
         ax.plot(X_test[:, 0], y_pred, color=color, lw=3)
 
@@ -1440,8 +1727,8 @@ def _(
             P_degree = get_P()
 
             # Use colormap for varying colors
-            import matplotlib.cm as cm
-            cmap = cm.get_cmap('viridis')
+            import matplotlib
+            cmap = matplotlib.colormaps['viridis']
             colors = [cmap(i / P_degree) for i in range(P_degree + 1)]
 
             for i in range(P_degree + 1):
@@ -1462,7 +1749,7 @@ def _(
 
     # Compute metrics for all active methods
     metrics_dict = {}
-    for method_label, (method_y_pred, method_y_std, method_fit_time, method_y_min, method_y_max, method_train_data, method_std_train, method_calib_data, method_std_calib) in method_predictions.items():
+    for method_label, (method_y_pred, method_y_std, method_fit_time, method_y_min, method_y_max, method_train_data, method_std_train, method_calib_data, method_std_calib, extra_data) in method_predictions.items():
         # Coverage on train+calib points and on all test points
         if method_label in ['POPS regression', 'Conformal prediction'] and method_train_data is not None:
             # Use min/max bounds for POPS/Conformal coverage
@@ -1501,12 +1788,44 @@ def _(
         # MSE (accuracy)
         method_mse = np.mean((y_test - method_y_pred) ** 2)
 
+        # Log likelihood and CRPS (probabilistic metrics)
+        if method_label == 'Neural network':
+            # NN ensemble: no parametric log likelihood, use empirical CRPS
+            method_log_lik = None
+            if 'ensemble_preds' in extra_data:
+                method_crps = crps_ensemble(y_test, extra_data['ensemble_preds'])
+            else:
+                method_crps = crps_gaussian(y_test, method_y_pred, method_y_std)
+        elif method_label == 'Quantile regression':
+            # Quantile regression: no parametric log likelihood, use quantile-based CRPS
+            method_log_lik = None
+            if 'y_lower' in extra_data:
+                method_crps = crps_quantile_approx(
+                    y_test,
+                    extra_data['y_lower'],
+                    extra_data['y_median'],
+                    extra_data['y_upper'],
+                    extra_data['alpha']
+                )
+            else:
+                method_crps = crps_gaussian(y_test, method_y_pred, method_y_std)
+        else:
+            # Gaussian methods (Bayesian, GP, POPS, Conformal): use Gaussian formulas
+            method_log_lik = gaussian_log_likelihood_per_point(y_test, method_y_pred, method_y_std)
+            method_crps = crps_gaussian(y_test, method_y_pred, method_y_std)
+
+        # Extract LOO log likelihood from extra_data (if available)
+        method_loo_log_lik = extra_data.get('loo_log_lik', None)
+
         metrics_dict[method_label] = {
             'coverage_train_calib': method_coverage_train_calib,
             'coverage_all': method_coverage_all,
             'mean_width': method_mean_width,
             'mse': method_mse,
-            'fit_time': method_fit_time
+            'fit_time': method_fit_time,
+            'log_likelihood': method_log_lik,
+            'crps': method_crps,
+            'loo_log_lik': method_loo_log_lik
         }
 
     mo.Html(f'''
@@ -1514,10 +1833,10 @@ def _(
         {mo.center(fig)}
     </div>
     ''')
-    return (bayes_log_ml, n, qhat, gp_log_ml, gp_sparsity, metrics_dict)
+    return bayes_log_ml, gp_log_ml, gp_sparsity, metrics_dict, n, qhat
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(
     bayesian,
     conformal,
@@ -1836,8 +2155,21 @@ def _(
     )
 
 
-@app.cell(hide_code=True)
-def _(bayes_log_ml, bayesian, conformal, gp_log_ml, gp_optimize_button, gp_regression, gp_sparsity, metrics_dict, mo, n, opt_message, qhat):
+@app.cell
+def _(
+    bayes_log_ml,
+    bayesian,
+    conformal,
+    gp_log_ml,
+    gp_optimize_button,
+    gp_regression,
+    gp_sparsity,
+    metrics_dict,
+    mo,
+    n,
+    opt_message,
+    qhat,
+):
     # Display computed outputs below the dashboard (only values not in sliders)
     output_items = []
 
@@ -1885,36 +2217,70 @@ def _(bayes_log_ml, bayesian, conformal, gp_log_ml, gp_optimize_button, gp_regre
     # Display metrics table
     metrics_html = ""
     if metrics_dict:
+        # Compute best/worst for each metric (for coloring)
+        # Higher is better: coverage, log_likelihood, loo_log_lik
+        # Lower is better: mse, crps, fit_time
+        all_cov_tc = [m['coverage_train_calib'] for m in metrics_dict.values()]
+        all_cov_all = [m['coverage_all'] for m in metrics_dict.values()]
+        all_mse = [m['mse'] for m in metrics_dict.values()]
+        all_log_lik = [m['log_likelihood'] for m in metrics_dict.values() if m['log_likelihood'] is not None]
+        all_loo = [m['loo_log_lik'] for m in metrics_dict.values() if m['loo_log_lik'] is not None]
+        all_crps = [m['crps'] for m in metrics_dict.values()]
+        all_time = [m['fit_time'] for m in metrics_dict.values()]
+
+        # Best/worst values (handle empty lists for optional metrics)
+        best_cov_tc, worst_cov_tc = max(all_cov_tc), min(all_cov_tc)
+        best_cov_all, worst_cov_all = max(all_cov_all), min(all_cov_all)
+        best_mse, worst_mse = min(all_mse), max(all_mse)
+        best_log_lik = max(all_log_lik) if all_log_lik else None
+        worst_log_lik = min(all_log_lik) if all_log_lik else None
+        best_loo = max(all_loo) if all_loo else None
+        worst_loo = min(all_loo) if all_loo else None
+        best_crps, worst_crps = min(all_crps), max(all_crps)
+        best_time, worst_time = min(all_time), max(all_time)
+
+        def get_color(val, best, worst):
+            """Return green for best, red for worst, black otherwise."""
+            if val == best and val != worst:  # Only color if there's a difference
+                return "#28a745"  # green
+            elif val == worst and val != best:
+                return "#dc3545"  # red
+            return "inherit"
+
         # Create table rows
         rows = []
         for method_name, method_metrics in metrics_dict.items():
-            cov_train_calib = method_metrics['coverage_train_calib']
+            cov_tc = method_metrics['coverage_train_calib']
             cov_all = method_metrics['coverage_all']
+            mse = method_metrics['mse']
+            log_lik = method_metrics['log_likelihood']
+            loo = method_metrics['loo_log_lik']
+            crps = method_metrics['crps']
+            m_fit_time = method_metrics['fit_time']
 
-            # Color code coverage (train+calib): green if >80%, yellow if >50%, red otherwise
-            if cov_train_calib > 80:
-                cov_tc_color = "#28a745"  # green
-            elif cov_train_calib > 50:
-                cov_tc_color = "#ffc107"  # yellow
-            else:
-                cov_tc_color = "#dc3545"  # red
+            # Get colors for each metric
+            cov_tc_color = get_color(cov_tc, best_cov_tc, worst_cov_tc)
+            cov_all_color = get_color(cov_all, best_cov_all, worst_cov_all)
+            mse_color = get_color(mse, best_mse, worst_mse)
+            log_lik_color = get_color(log_lik, best_log_lik, worst_log_lik) if log_lik is not None else "inherit"
+            loo_color = get_color(loo, best_loo, worst_loo) if loo is not None else "inherit"
+            crps_color = get_color(crps, best_crps, worst_crps)
+            time_color = get_color(m_fit_time, best_time, worst_time)
 
-            # Color code coverage (all): green if >80%, yellow if >50%, red otherwise
-            if cov_all > 80:
-                cov_all_color = "#28a745"  # green
-            elif cov_all > 50:
-                cov_all_color = "#ffc107"  # yellow
-            else:
-                cov_all_color = "#dc3545"  # red
+            # Format values
+            log_lik_str = f"{log_lik:.2f}" if log_lik is not None else "-"
+            loo_str = f"{loo:.2f}" if loo is not None else "-"
 
             rows.append(f'''
             <tr>
                 <td style="text-align: left; padding: 5px 10px;"><b>{method_name}</b></td>
-                <td style="text-align: center; padding: 5px 10px; color: {cov_tc_color};"><b>{cov_train_calib:.1f}%</b></td>
-                <td style="text-align: center; padding: 5px 10px; color: {cov_all_color};"><b>{cov_all:.1f}%</b></td>
-                <td style="text-align: center; padding: 5px 10px;">{method_metrics['mean_width']:.3f}</td>
-                <td style="text-align: center; padding: 5px 10px;">{method_metrics['mse']:.4f}</td>
-                <td style="text-align: center; padding: 5px 10px;">{method_metrics['fit_time']*1000:.1f} ms</td>
+                <td style="text-align: center; padding: 5px 10px; color: {cov_tc_color};">{cov_tc:.1f}%</td>
+                <td style="text-align: center; padding: 5px 10px; color: {cov_all_color};">{cov_all:.1f}%</td>
+                <td style="text-align: center; padding: 5px 10px; color: {mse_color};">{mse:.4f}</td>
+                <td style="text-align: center; padding: 5px 10px; color: {log_lik_color};">{log_lik_str}</td>
+                <td style="text-align: center; padding: 5px 10px; color: {loo_color};">{loo_str}</td>
+                <td style="text-align: center; padding: 5px 10px; color: {crps_color};">{crps:.4f}</td>
+                <td style="text-align: center; padding: 5px 10px; color: {time_color};">{m_fit_time*1000:.1f} ms</td>
             </tr>
             ''')
 
@@ -1927,8 +2293,10 @@ def _(bayes_log_ml, bayesian, conformal, gp_log_ml, gp_optimize_button, gp_regre
                         <th style="text-align: left; padding: 5px 10px;">Method</th>
                         <th style="text-align: center; padding: 5px 10px;">Coverage (train+calib)</th>
                         <th style="text-align: center; padding: 5px 10px;">Coverage (all)</th>
-                        <th style="text-align: center; padding: 5px 10px;">Interval Width</th>
                         <th style="text-align: center; padding: 5px 10px;">MSE</th>
+                        <th style="text-align: center; padding: 5px 10px;">Log Lik</th>
+                        <th style="text-align: center; padding: 5px 10px;">LOO</th>
+                        <th style="text-align: center; padding: 5px 10px;">CRPS</th>
                         <th style="text-align: center; padding: 5px 10px;">Fit Time</th>
                     </tr>
                 </thead>
@@ -2031,11 +2399,16 @@ def _(mo):
         get_gp_mean_regularization,
         get_gp_poly_mean_degree,
         get_gp_support_radius,
+        get_last_enabled_method,
+        get_nn_activation,
+        get_nn_ensemble_method,
         get_nn_ensemble_size,
         get_nn_hidden_units,
         get_nn_num_layers,
         get_nn_regularization,
         get_percentile_clipping,
+        get_quantile_confidence,
+        get_quantile_regularization,
         get_seed,
         get_sigma,
         get_zeta,
@@ -2051,11 +2424,16 @@ def _(mo):
         set_gp_mean_regularization,
         set_gp_poly_mean_degree,
         set_gp_support_radius,
+        set_last_enabled_method,
+        set_nn_activation,
+        set_nn_ensemble_method,
         set_nn_ensemble_size,
         set_nn_hidden_units,
         set_nn_num_layers,
         set_nn_regularization,
         set_percentile_clipping,
+        set_quantile_confidence,
+        set_quantile_regularization,
         set_seed,
         set_sigma,
         set_zeta,
@@ -2076,7 +2454,6 @@ def _(
     gp_optimize_button,
     gp_support_radius_slider,
     gp_use_poly_mean,
-    mo,
     np,
     optimize_gp_hyperparameters,
     seed,
@@ -2158,7 +2535,6 @@ def _(
             }
         except Exception as e:
             opt_message = {'error': str(e)}
-
     return (opt_message,)
 
 
