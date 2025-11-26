@@ -1285,23 +1285,79 @@ def _(
 
             if label == 'POPS regression':
                 y_pred, y_std, y_min, y_max = model.predict(X_test_model, return_std=True, return_bounds=True)
+                # Also get bounds at train+calib points for coverage calculation
+                _, _, y_min_train, y_max_train = model.predict(Phi_train, return_std=True, return_bounds=True)
+                _, _, y_min_calib, y_max_calib = model.predict(Phi_calib, return_std=True, return_bounds=True)
                 if aleatoric.value:
                     y_std = np.sqrt(y_std**2 + 1.0 / model.alpha_)
+            elif label == 'Conformal prediction':
+                y_pred, y_std = model.predict(X_test_model, **kwargs)
+                # Conformal bounds are y_pred ± y_std (already rescaled by qhat)
+                y_min = y_pred - y_std
+                y_max = y_pred + y_std
+                # Get bounds at train+calib points
+                y_pred_train, y_std_train = model.predict(Phi_train, **kwargs)
+                y_pred_calib_conf, y_std_calib_conf = model.predict(Phi_calib, **kwargs)
+                y_min_train = y_pred_train - y_std_train
+                y_max_train = y_pred_train + y_std_train
+                y_min_calib = y_pred_calib_conf - y_std_calib_conf
+                y_max_calib = y_pred_calib_conf + y_std_calib_conf
             else:
                 y_pred, y_std = model.predict(X_test_model, **kwargs)
 
         # Store predictions and timing for metrics computation
+        # Also get predictions at train+calib points for coverage calculation
         fit_time = time.time() - start_time
-        method_predictions[label] = (y_pred, y_std, fit_time)
+
+        if label == 'POPS regression':
+            # POPS: use min/max bounds for coverage
+            method_predictions[label] = (y_pred, y_std, fit_time, y_min, y_max, y_min_train, y_max_train, y_min_calib, y_max_calib)
+        elif label == 'Conformal prediction':
+            # Conformal: use min/max bounds for coverage (already computed above)
+            method_predictions[label] = (y_pred, y_std, fit_time, y_min, y_max, y_min_train, y_max_train, y_min_calib, y_max_calib)
+        elif label == 'GP regression':
+            # GP: get std at train/calib points
+            _, y_std_train = fit_gp_numpy(
+                X_train[:, 0], y_train, X_train[:, 0],
+                kernel_type=get_gp_kernel_type(), lengthscale=get_gp_lengthscale(),
+                support_radius=get_gp_support_radius(), degree=get_P(), sigma=1.0,
+                noise=sigma.value**2, use_polynomial_mean=gp_use_poly_mean.value,
+                poly_degree=get_gp_poly_mean_degree(), joint_inference=get_gp_joint_inference(),
+                mean_regularization_strength=get_gp_mean_regularization()
+            )[:2]
+            y_pred_calib, y_std_calib = fit_gp_numpy(
+                X_train[:, 0], y_train, X_calib[:, 0],
+                kernel_type=get_gp_kernel_type(), lengthscale=get_gp_lengthscale(),
+                support_radius=get_gp_support_radius(), degree=get_P(), sigma=1.0,
+                noise=sigma.value**2, use_polynomial_mean=gp_use_poly_mean.value,
+                poly_degree=get_gp_poly_mean_degree(), joint_inference=get_gp_joint_inference(),
+                mean_regularization_strength=get_gp_mean_regularization()
+            )[:2]
+            y_pred_train = fit_gp_numpy(
+                X_train[:, 0], y_train, X_train[:, 0],
+                kernel_type=get_gp_kernel_type(), lengthscale=get_gp_lengthscale(),
+                support_radius=get_gp_support_radius(), degree=get_P(), sigma=1.0,
+                noise=sigma.value**2, use_polynomial_mean=gp_use_poly_mean.value,
+                poly_degree=get_gp_poly_mean_degree(), joint_inference=get_gp_joint_inference(),
+                mean_regularization_strength=get_gp_mean_regularization()
+            )[0]
+            method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib)
+        elif label == 'Neural network':
+            # NN: get std at train/calib points
+            y_pred_train, y_std_train = nn.predict(X_train, return_std=True)
+            y_pred_calib, y_std_calib = nn.predict(X_calib, return_std=True)
+            method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib)
+        else:
+            # Polynomial-basis methods: get std at train/calib points
+            y_pred_train, y_std_train = model.predict(Phi_train, return_std=True)
+            y_pred_calib, y_std_calib = model.predict(Phi_calib, return_std=True)
+            method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib)
 
         ax.plot(X_test[:, 0], y_pred, color=color, lw=3)
 
         # For POPS and Conformal, shade min/max bounds instead of ±1σ
-        if label == 'POPS regression':
+        if label in ['POPS regression', 'Conformal prediction']:
             ax.fill_between(X_test[:, 0], y_min, y_max, alpha=0.5, color=color, label=label)
-        elif label == 'Conformal prediction':
-            # Conformal uses qhat-rescaled std as the interval half-width
-            ax.fill_between(X_test[:, 0], y_pred - y_std, y_pred + y_std, alpha=0.5, color=color, label=label)
         else:
             ax.fill_between(X_test[:, 0], y_pred - y_std, y_pred + y_std, alpha=0.5, color=color, label=label)
 
@@ -1402,13 +1458,34 @@ def _(
 
     # Compute metrics for all active methods
     metrics_dict = {}
-    for method_label, (method_y_pred, method_y_std, method_fit_time) in method_predictions.items():
-        # Coverage: % of test points within predicted intervals
-        method_in_interval = np.abs(y_test - method_y_pred) <= method_y_std
-        method_coverage = 100.0 * np.mean(method_in_interval)
+    for method_label, (method_y_pred, method_y_std, method_fit_time, method_y_min, method_y_max, method_train_data, method_std_train, method_calib_data, method_std_calib) in method_predictions.items():
+        # Coverage: % of train+calib points within predicted intervals
+        if method_label in ['POPS regression', 'Conformal prediction'] and method_train_data is not None:
+            # Use min/max bounds on train+calib data for POPS/Conformal coverage
+            lower_train = np.minimum(method_train_data, method_std_train)  # y_min_train, y_max_train
+            upper_train = np.maximum(method_train_data, method_std_train)
+            lower_calib = np.minimum(method_calib_data, method_std_calib)  # y_min_calib, y_max_calib
+            upper_calib = np.maximum(method_calib_data, method_std_calib)
 
-        # Mean interval width (sharpness)
-        method_mean_width = np.mean(2 * method_y_std)
+            in_interval_train = (y_train >= lower_train) & (y_train <= upper_train)
+            in_interval_calib = (y_calib >= lower_calib) & (y_calib <= upper_calib)
+            method_coverage = 100 * np.mean(np.concatenate([in_interval_train, in_interval_calib]))
+
+            # Mean width on test data for display
+            lower_bound = np.minimum(method_y_min, method_y_max)
+            upper_bound = np.maximum(method_y_min, method_y_max)
+            method_mean_width = np.mean(upper_bound - lower_bound)
+        elif method_train_data is not None:
+            # Other methods: use ±std on train+calib data
+            in_interval_train = np.abs(y_train - method_train_data) <= method_std_train
+            in_interval_calib = np.abs(y_calib - method_calib_data) <= method_std_calib
+            method_coverage = 100 * np.mean(np.concatenate([in_interval_train, in_interval_calib]))
+            method_mean_width = np.mean(2 * method_y_std)
+        else:
+            # Fallback to test data if train/calib not available
+            method_in_interval = np.abs(y_test - method_y_pred) <= method_y_std
+            method_coverage = 100.0 * np.mean(method_in_interval)
+            method_mean_width = np.mean(2 * method_y_std)
 
         # MSE (accuracy)
         method_mse = np.mean((y_test - method_y_pred) ** 2)
