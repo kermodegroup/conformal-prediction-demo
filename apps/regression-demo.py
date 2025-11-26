@@ -1289,7 +1289,15 @@ def _(
                 _, _, y_min_train, y_max_train = model.predict(Phi_train, return_std=True, return_bounds=True)
                 _, _, y_min_calib, y_max_calib = model.predict(Phi_calib, return_std=True, return_bounds=True)
                 if aleatoric.value:
-                    y_std = np.sqrt(y_std**2 + 1.0 / model.alpha_)
+                    # Add aleatoric uncertainty to all bounds
+                    aleatoric_std = np.sqrt(1.0 / model.alpha_)
+                    y_std = np.sqrt(y_std**2 + aleatoric_std**2)
+                    y_min = y_min - aleatoric_std
+                    y_max = y_max + aleatoric_std
+                    y_min_train = y_min_train - aleatoric_std
+                    y_max_train = y_max_train + aleatoric_std
+                    y_min_calib = y_min_calib - aleatoric_std
+                    y_max_calib = y_max_calib + aleatoric_std
             elif label == 'Conformal prediction':
                 y_pred, y_std = model.predict(X_test_model, **kwargs)
                 # Conformal bounds are y_pred ± y_std (already rescaled by qhat)
@@ -1317,7 +1325,7 @@ def _(
             method_predictions[label] = (y_pred, y_std, fit_time, y_min, y_max, y_min_train, y_max_train, y_min_calib, y_max_calib)
         elif label == 'GP regression':
             # GP: get std at train/calib points
-            _, y_std_train = fit_gp_numpy(
+            y_pred_train, y_std_train = fit_gp_numpy(
                 X_train[:, 0], y_train, X_train[:, 0],
                 kernel_type=get_gp_kernel_type(), lengthscale=get_gp_lengthscale(),
                 support_radius=get_gp_support_radius(), degree=get_P(), sigma=1.0,
@@ -1333,14 +1341,10 @@ def _(
                 poly_degree=get_gp_poly_mean_degree(), joint_inference=get_gp_joint_inference(),
                 mean_regularization_strength=get_gp_mean_regularization()
             )[:2]
-            y_pred_train = fit_gp_numpy(
-                X_train[:, 0], y_train, X_train[:, 0],
-                kernel_type=get_gp_kernel_type(), lengthscale=get_gp_lengthscale(),
-                support_radius=get_gp_support_radius(), degree=get_P(), sigma=1.0,
-                noise=sigma.value**2, use_polynomial_mean=gp_use_poly_mean.value,
-                poly_degree=get_gp_poly_mean_degree(), joint_inference=get_gp_joint_inference(),
-                mean_regularization_strength=get_gp_mean_regularization()
-            )[0]
+            # Add aleatoric uncertainty if GP aleatoric checkbox is enabled
+            if aleatoric_gp.value:
+                y_std_train = np.sqrt(y_std_train**2 + sigma.value**2)
+                y_std_calib = np.sqrt(y_std_calib**2 + sigma.value**2)
             method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib)
         elif label == 'Neural network':
             # NN: get std at train/calib points
@@ -1348,9 +1352,9 @@ def _(
             y_pred_calib, y_std_calib = nn.predict(X_calib, return_std=True)
             method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib)
         else:
-            # Polynomial-basis methods: get std at train/calib points
-            y_pred_train, y_std_train = model.predict(Phi_train, return_std=True)
-            y_pred_calib, y_std_calib = model.predict(Phi_calib, return_std=True)
+            # Polynomial-basis methods: get std at train/calib points (with aleatoric if enabled)
+            y_pred_train, y_std_train = model.predict(Phi_train, return_std=True, aleatoric=aleatoric.value)
+            y_pred_calib, y_std_calib = model.predict(Phi_calib, return_std=True, aleatoric=aleatoric.value)
             method_predictions[label] = (y_pred, y_std, fit_time, None, None, y_pred_train, y_std_train, y_pred_calib, y_std_calib)
 
         ax.plot(X_test[:, 0], y_pred, color=color, lw=3)
