@@ -5,7 +5,7 @@
 #     "watchdog",
 #     "matplotlib==3.10.1",
 #     "numpy==2.2.5",
-#     "popsregression @ git+https://github.com/tomswinburne/POPS-Regression.git",
+#     "popsregression @ git+https://github.com/tomswinburne/POPS-Regression.git@fefa1f60814320df8e30735135f2426833af63df",
 #     "scikit-learn==1.6.1",
 #     "seaborn==0.13.2",
 #     "qrcode==8.2",
@@ -1364,6 +1364,8 @@ def _(
     get_nn_num_layers,
     get_nn_regularization,
     get_percentile_clipping,
+    get_pops_posterior,
+    get_leverage_percentile,
     get_quantile_confidence,
     get_quantile_regularization,
     get_seed,
@@ -1421,9 +1423,12 @@ def _(
     Phi_calib = poly.transform(X_calib)
 
     b = MyBayesianRidge(fit_intercept=False)
-    # Note: POPS mode selection UI is available but not yet implemented in the library
-    # The library currently only supports hypercube sampling mode
-    p = POPSRegression(fit_intercept=False, percentile_clipping=get_percentile_clipping(), leverage_percentile=0)
+    p = POPSRegression(
+        fit_intercept=False,
+        percentile_clipping=get_percentile_clipping(),
+        leverage_percentile=get_leverage_percentile(),
+        posterior=get_pops_posterior()
+    )
     c = ConformalPrediction(fit_intercept=False)
     q = QuantileRegressionUQ(confidence=get_quantile_confidence(), fit_intercept=False, alpha=get_quantile_regularization())
 
@@ -1856,6 +1861,8 @@ def _(
     get_nn_num_layers,
     get_nn_regularization,
     get_percentile_clipping,
+    get_pops_posterior,
+    get_leverage_percentile,
     get_quantile_confidence,
     get_quantile_regularization,
     get_seed,
@@ -1888,6 +1895,8 @@ def _(
     set_nn_num_layers,
     set_nn_regularization,
     set_percentile_clipping,
+    set_pops_posterior,
+    set_leverage_percentile,
     set_quantile_confidence,
     set_quantile_regularization,
     set_seed,
@@ -1951,8 +1960,17 @@ def _(
 
     # POPS regression section with conditional styling
     if pops.value:
+        pops_posterior_radio = mo.ui.radio(
+            options=['hypercube', 'ensemble'],
+            value=get_pops_posterior(),
+            label='Posterior',
+            on_change=set_pops_posterior
+        )
+        leverage_percentile_slider = mo.ui.slider(0.0, 50.0, 1.0, get_leverage_percentile(), label="Leverage percentile", on_change=set_leverage_percentile)
         percentile_clipping = mo.ui.slider(0, 10, 1, get_percentile_clipping(), label="Percentile clipping", on_change=set_percentile_clipping)
     else:
+        pops_posterior_radio = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.radio(options=['hypercube', 'ensemble'], value=get_pops_posterior(), label='Posterior', disabled=True)}</div>")
+        leverage_percentile_slider = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.0, 50.0, 1.0, get_leverage_percentile(), label='Leverage percentile', disabled=True)}</div>")
         percentile_clipping = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0, 10, 1, get_percentile_clipping(), label='Percentile clipping', disabled=True, on_change=set_percentile_clipping)}</div>")
 
     # Quantile regression section with conditional styling
@@ -2066,6 +2084,8 @@ def _(
         mo.left(conformal),
         calib_frac, zeta, cp_separator,
         mo.left(pops),
+        pops_posterior_radio,
+        leverage_percentile_slider,
         percentile_clipping
     ])
 
@@ -2358,6 +2378,8 @@ def _(mo):
     get_calib_frac, set_calib_frac = mo.state(0.2)
     get_zeta, set_zeta = mo.state(0.05)
     get_percentile_clipping, set_percentile_clipping = mo.state(0)
+    get_pops_posterior, set_pops_posterior = mo.state('ensemble')
+    get_leverage_percentile, set_leverage_percentile = mo.state(0.0)
 
     # GP-specific state
     get_gp_kernel_type, set_gp_kernel_type = mo.state('rbf')
@@ -2407,6 +2429,8 @@ def _(mo):
         get_nn_num_layers,
         get_nn_regularization,
         get_percentile_clipping,
+        get_pops_posterior,
+        get_leverage_percentile,
         get_quantile_confidence,
         get_quantile_regularization,
         get_seed,
@@ -2432,6 +2456,8 @@ def _(mo):
         set_nn_num_layers,
         set_nn_regularization,
         set_percentile_clipping,
+        set_pops_posterior,
+        set_leverage_percentile,
         set_quantile_confidence,
         set_quantile_regularization,
         set_seed,
