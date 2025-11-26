@@ -1423,12 +1423,28 @@ def _(
     Phi_calib = poly.transform(X_calib)
 
     b = MyBayesianRidge(fit_intercept=False)
-    p = POPSRegression(
-        fit_intercept=False,
-        percentile_clipping=get_percentile_clipping(),
-        leverage_percentile=get_leverage_percentile(),
-        posterior=get_pops_posterior()
-    )
+    # Try new API with posterior parameter, fall back to old API for WASM compatibility
+    try:
+        p = POPSRegression(
+            fit_intercept=False,
+            percentile_clipping=get_percentile_clipping(),
+            leverage_percentile=get_leverage_percentile(),
+            posterior=get_pops_posterior()
+        )
+    except TypeError:
+        # Older version - try without posterior, then without leverage_percentile
+        try:
+            p = POPSRegression(
+                fit_intercept=False,
+                percentile_clipping=get_percentile_clipping(),
+                leverage_percentile=get_leverage_percentile()
+            )
+        except TypeError:
+            # Oldest version with only percentile_clipping
+            p = POPSRegression(
+                fit_intercept=False,
+                percentile_clipping=get_percentile_clipping()
+            )
     c = ConformalPrediction(fit_intercept=False)
     q = QuantileRegressionUQ(confidence=get_quantile_confidence(), fit_intercept=False, alpha=get_quantile_regularization())
 
