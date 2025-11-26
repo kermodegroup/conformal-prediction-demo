@@ -1459,9 +1459,9 @@ def _(
     # Compute metrics for all active methods
     metrics_dict = {}
     for method_label, (method_y_pred, method_y_std, method_fit_time, method_y_min, method_y_max, method_train_data, method_std_train, method_calib_data, method_std_calib) in method_predictions.items():
-        # Coverage: % of train+calib points within predicted intervals
+        # Coverage on train+calib points and on all test points
         if method_label in ['POPS regression', 'Conformal prediction'] and method_train_data is not None:
-            # Use min/max bounds on train+calib data for POPS/Conformal coverage
+            # Use min/max bounds for POPS/Conformal coverage
             lower_train = np.minimum(method_train_data, method_std_train)  # y_min_train, y_max_train
             upper_train = np.maximum(method_train_data, method_std_train)
             lower_calib = np.minimum(method_calib_data, method_std_calib)  # y_min_calib, y_max_calib
@@ -1469,29 +1469,37 @@ def _(
 
             in_interval_train = (y_train >= lower_train) & (y_train <= upper_train)
             in_interval_calib = (y_calib >= lower_calib) & (y_calib <= upper_calib)
-            method_coverage = 100 * np.mean(np.concatenate([in_interval_train, in_interval_calib]))
+            method_coverage_train_calib = 100 * np.mean(np.concatenate([in_interval_train, in_interval_calib]))
+
+            # Coverage on all test points
+            lower_test = np.minimum(method_y_min, method_y_max)
+            upper_test = np.maximum(method_y_min, method_y_max)
+            method_coverage_all = 100 * np.mean((y_test >= lower_test) & (y_test <= upper_test))
 
             # Mean width on test data for display
-            lower_bound = np.minimum(method_y_min, method_y_max)
-            upper_bound = np.maximum(method_y_min, method_y_max)
-            method_mean_width = np.mean(upper_bound - lower_bound)
+            method_mean_width = np.mean(upper_test - lower_test)
         elif method_train_data is not None:
-            # Other methods: use ±std on train+calib data
+            # Other methods: use ±std
             in_interval_train = np.abs(y_train - method_train_data) <= method_std_train
             in_interval_calib = np.abs(y_calib - method_calib_data) <= method_std_calib
-            method_coverage = 100 * np.mean(np.concatenate([in_interval_train, in_interval_calib]))
+            method_coverage_train_calib = 100 * np.mean(np.concatenate([in_interval_train, in_interval_calib]))
+
+            # Coverage on all test points
+            method_coverage_all = 100 * np.mean(np.abs(y_test - method_y_pred) <= method_y_std)
+
             method_mean_width = np.mean(2 * method_y_std)
         else:
             # Fallback to test data if train/calib not available
-            method_in_interval = np.abs(y_test - method_y_pred) <= method_y_std
-            method_coverage = 100.0 * np.mean(method_in_interval)
+            method_coverage_train_calib = 100.0 * np.mean(np.abs(y_test - method_y_pred) <= method_y_std)
+            method_coverage_all = method_coverage_train_calib
             method_mean_width = np.mean(2 * method_y_std)
 
         # MSE (accuracy)
         method_mse = np.mean((y_test - method_y_pred) ** 2)
 
         metrics_dict[method_label] = {
-            'coverage': method_coverage,
+            'coverage_train_calib': method_coverage_train_calib,
+            'coverage_all': method_coverage_all,
             'mean_width': method_mean_width,
             'mse': method_mse,
             'fit_time': method_fit_time
@@ -1876,19 +1884,30 @@ def _(bayes_log_ml, bayesian, conformal, gp_log_ml, gp_optimize_button, gp_regre
         # Create table rows
         rows = []
         for method_name, method_metrics in metrics_dict.items():
-            cov_pct = method_metrics['coverage']
-            # Color code coverage: green if >85%, yellow if 70-85%, red if <70%
-            if cov_pct >= 85:
-                coverage_color = "#28a745"  # green
-            elif cov_pct >= 70:
-                coverage_color = "#ffc107"  # yellow
+            cov_train_calib = method_metrics['coverage_train_calib']
+            cov_all = method_metrics['coverage_all']
+
+            # Color code coverage (train+calib): green if >80%, yellow if >50%, red otherwise
+            if cov_train_calib > 80:
+                cov_tc_color = "#28a745"  # green
+            elif cov_train_calib > 50:
+                cov_tc_color = "#ffc107"  # yellow
             else:
-                coverage_color = "#dc3545"  # red
+                cov_tc_color = "#dc3545"  # red
+
+            # Color code coverage (all): green if >80%, yellow if >50%, red otherwise
+            if cov_all > 80:
+                cov_all_color = "#28a745"  # green
+            elif cov_all > 50:
+                cov_all_color = "#ffc107"  # yellow
+            else:
+                cov_all_color = "#dc3545"  # red
 
             rows.append(f'''
             <tr>
                 <td style="text-align: left; padding: 5px 10px;"><b>{method_name}</b></td>
-                <td style="text-align: center; padding: 5px 10px; color: {coverage_color};"><b>{cov_pct:.1f}%</b></td>
+                <td style="text-align: center; padding: 5px 10px; color: {cov_tc_color};"><b>{cov_train_calib:.1f}%</b></td>
+                <td style="text-align: center; padding: 5px 10px; color: {cov_all_color};"><b>{cov_all:.1f}%</b></td>
                 <td style="text-align: center; padding: 5px 10px;">{method_metrics['mean_width']:.3f}</td>
                 <td style="text-align: center; padding: 5px 10px;">{method_metrics['mse']:.4f}</td>
                 <td style="text-align: center; padding: 5px 10px;">{method_metrics['fit_time']*1000:.1f} ms</td>
@@ -1902,7 +1921,8 @@ def _(bayes_log_ml, bayesian, conformal, gp_log_ml, gp_optimize_button, gp_regre
                 <thead>
                     <tr style="border-bottom: 2px solid #dee2e6;">
                         <th style="text-align: left; padding: 5px 10px;">Method</th>
-                        <th style="text-align: center; padding: 5px 10px;">Coverage</th>
+                        <th style="text-align: center; padding: 5px 10px;">Coverage (train+calib)</th>
+                        <th style="text-align: center; padding: 5px 10px;">Coverage (all)</th>
                         <th style="text-align: center; padding: 5px 10px;">Interval Width</th>
                         <th style="text-align: center; padding: 5px 10px;">MSE</th>
                         <th style="text-align: center; padding: 5px 10px;">Fit Time</th>
