@@ -1295,11 +1295,15 @@ def _(
         method_predictions[label] = (y_pred, y_std, fit_time)
 
         ax.plot(X_test[:, 0], y_pred, color=color, lw=3)
-        ax.fill_between(X_test[:, 0], y_pred - y_std, y_pred + y_std, alpha=0.5, color=color, label=label)
 
+        # For POPS and Conformal, shade min/max bounds instead of ±1σ
         if label == 'POPS regression':
-            ax.plot(X_test[:, 0], y_min, 'k--', lw=1, label='POPS min/max')
-            ax.plot(X_test[:, 0], y_max, 'k--', lw=1)
+            ax.fill_between(X_test[:, 0], y_min, y_max, alpha=0.5, color=color, label=label)
+        elif label == 'Conformal prediction':
+            # Conformal uses qhat-rescaled std as the interval half-width
+            ax.fill_between(X_test[:, 0], y_pred - y_std, y_pred + y_std, alpha=0.5, color=color, label=label)
+        else:
+            ax.fill_between(X_test[:, 0], y_pred - y_std, y_pred + y_std, alpha=0.5, color=color, label=label)
 
     # No title needed - all info is in the dashboard and outputs bar
     ax.set_xlim(-10, 10)
