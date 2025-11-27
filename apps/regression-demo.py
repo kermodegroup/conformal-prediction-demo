@@ -5,7 +5,7 @@
 #     "watchdog",
 #     "matplotlib==3.10.1",
 #     "numpy==2.2.5",
-#     "popsregression=0.3.5",
+#     "popsregression==0.3.5",
 #     "scikit-learn==1.6.1",
 #     "seaborn==0.13.2",
 #     "qrcode==8.2",
