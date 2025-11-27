@@ -5,7 +5,7 @@
 #     "watchdog",
 #     "matplotlib==3.10.1",
 #     "numpy==2.2.5",
-#     "popsregression @ git+https://github.com/tomswinburne/POPS-Regression.git@fefa1f60814320df8e30735135f2426833af63df",
+#     "popsregression=0.3.5",
 #     "scikit-learn==1.6.1",
 #     "seaborn==0.13.2",
 #     "qrcode==8.2",
