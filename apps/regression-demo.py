@@ -127,6 +127,15 @@ def _(np):
         elif function_type == 'runge':
             # Runge function: 1/(1+25x²) - pathological for polynomial interpolation
             y = 1.0 / (1.0 + 25.0 * X**2)
+        elif function_type == 'lj':
+            # Lennard-Jones potential: V(r) = 4ε[(σ/r)^12 - (σ/r)^6]
+            # r = x/5 + 1.5 maps x=0 to r=1.5 (at sigma), x=5 to r=2.5, x=10 to r=3.5
+            sigma = 1.5
+            r = X / 5.0 + 1.5
+            r = np.maximum(r, 0.3)  # Avoid singularity
+            y = 4.0 * ((sigma / r) ** 12 - (sigma / r) ** 6)
+            # Clip extreme values for display
+            y = np.clip(y, -1.5, 1.5)
         else:
             y = np.sin(X)  # Default to sin
 
@@ -585,9 +594,9 @@ def _(cho_factor, cho_solve, np):
 
         return data_fit + complexity + constant
 
-    def gp_joint_marginal_likelihood(X_train, y_train, K_train, noise, Phi_train, mean_regularization_strength, poly_degree):
+    def gp_joint_marginal_likelihood(X_train, y_train, K_train, noise, Phi_train, mean_regularization_strength):
         """
-        Compute log marginal likelihood with joint Bayesian inference over polynomial mean coefficients
+        Compute log marginal likelihood with joint Bayesian inference over basis mean coefficients
 
         Model: y = Φβ + f + ε
         where β ~ N(0, λ⁻¹I), f ~ GP(0, K), ε ~ N(0, σ²I)
@@ -602,30 +611,26 @@ def _(cho_factor, cho_solve, np):
         y_train : array (n_train,)
         K_train : array (n_train, n_train) - GP kernel on training data
         noise : float - observation noise variance
-        Phi_train : array (n_train, n_features) - polynomial feature matrix
-        mean_regularization_strength : float - regularization strength for polynomial coefficients
-        poly_degree : int - polynomial degree (for degree-adaptive regularization)
+        Phi_train : array (n_train, n_features) - pre-computed basis feature matrix
+        mean_regularization_strength : float - regularization strength for basis coefficients
 
         Returns:
         --------
         log_marginal_likelihood : float
         """
-        from sklearn.preprocessing import PolynomialFeatures
-
         n = len(y_train)
 
-        # Create polynomial features if not provided
         if Phi_train is None:
-            poly = PolynomialFeatures(degree=poly_degree, include_bias=True)
-            Phi_train = poly.fit_transform(X_train.reshape(-1, 1))
+            # No basis mean - should not happen, but handle gracefully
+            return gp_marginal_likelihood(X_train, y_train, K_train, noise)
 
-        # Normalize polynomial features for numerical stability
+        # Normalize basis features for numerical stability
         Phi_train_std = np.std(Phi_train, axis=0, keepdims=True)
         Phi_train_std[Phi_train_std < 1e-10] = 1.0
         Phi_train_normalized = Phi_train / Phi_train_std
 
-        # Prior precision for polynomial coefficients (degree-adaptive)
-        lambda_prior = mean_regularization_strength * (poly_degree / 3.0)
+        # Prior precision for basis coefficients
+        lambda_prior = mean_regularization_strength
         Lambda_inv = (1.0 / lambda_prior) * np.eye(Phi_train_normalized.shape[1])
 
         # Adjust for normalization
@@ -755,7 +760,7 @@ def _(cho_factor, cho_solve, np):
             return -np.inf
 
     def optimize_gp_hyperparameters(X_train, y_train, kernel_type, initial_params, max_iter=50,
-                                     use_polynomial_mean=False, poly_degree=None, joint_inference=False,
+                                     use_basis_mean=False, Phi_train=None, joint_inference=False,
                                      mean_regularization_strength=0.1):
         """
         Optimize GP hyperparameters by maximizing marginal likelihood
@@ -767,8 +772,8 @@ def _(cho_factor, cho_solve, np):
         kernel_type : str
         initial_params : dict with initial hyperparameter values
         max_iter : int, maximum optimization iterations
-        use_polynomial_mean : bool, whether to use polynomial mean function
-        poly_degree : int, degree of polynomial mean (for joint inference)
+        use_basis_mean : bool, whether to use basis mean function
+        Phi_train : array (n_train, n_basis) or None - pre-computed basis features
         joint_inference : bool, if True optimize mean regularization jointly
         mean_regularization_strength : float, initial mean regularization strength
 
@@ -778,20 +783,13 @@ def _(cho_factor, cho_solve, np):
         log_marginal_likelihood : float
         """
         from scipy.optimize import minimize
-        from sklearn.preprocessing import PolynomialFeatures
 
         X_train = np.atleast_1d(X_train).reshape(-1)
         y_train = np.atleast_1d(y_train).reshape(-1)
 
-        # Precompute polynomial features if using joint inference
-        Phi_train = None
-        if use_polynomial_mean and joint_inference and poly_degree is not None:
-            poly = PolynomialFeatures(degree=poly_degree, include_bias=True)
-            Phi_train = poly.fit_transform(X_train.reshape(-1, 1))
-
         # Define bounds and parameterization (work in log space for positive params)
         if kernel_type == 'rbf':
-            if use_polynomial_mean and joint_inference:
+            if use_basis_mean and joint_inference and Phi_train is not None:
                 # Optimize: log_lengthscale, log_noise, log_mean_regularization
                 def pack_params(lengthscale, noise, mean_reg):
                     return np.array([np.log(lengthscale), np.log(noise), np.log(mean_reg)])
@@ -818,7 +816,7 @@ def _(cho_factor, cho_solve, np):
 
         elif kernel_type == 'matern':
             # Same hyperparameters as RBF: lengthscale and noise
-            if use_polynomial_mean and joint_inference:
+            if use_basis_mean and joint_inference and Phi_train is not None:
                 # Optimize: log_lengthscale, log_noise, log_mean_regularization
                 def pack_params(lengthscale, noise, mean_reg):
                     return np.array([np.log(lengthscale), np.log(noise), np.log(mean_reg)])
@@ -844,7 +842,7 @@ def _(cho_factor, cho_solve, np):
                 bounds = [(-2, 2), (-6, 0)]
 
         elif kernel_type == 'bump':
-            if use_polynomial_mean and joint_inference:
+            if use_basis_mean and joint_inference and Phi_train is not None:
                 # Optimize: log_lengthscale, log_support_radius, log_noise, log_mean_regularization
                 def pack_params(lengthscale, support_radius, noise, mean_reg):
                     return np.array([np.log(lengthscale), np.log(support_radius),
@@ -877,7 +875,7 @@ def _(cho_factor, cho_solve, np):
             # Optimize: log_sigma, log_noise (keep degree fixed)
             degree = initial_params.get('degree', 5)
 
-            if use_polynomial_mean and joint_inference:
+            if use_basis_mean and joint_inference and Phi_train is not None:
                 def pack_params(sigma, noise, mean_reg):
                     return np.array([np.log(sigma), np.log(noise), np.log(mean_reg)])
 
@@ -911,9 +909,9 @@ def _(cho_factor, cho_solve, np):
             K_train = compute_kernel_matrix(X_train, X_train, kernel_type, params)
 
             # Use joint marginal likelihood if optimizing mean regularization
-            if mean_reg is not None and use_polynomial_mean and joint_inference:
+            if mean_reg is not None and use_basis_mean and joint_inference and Phi_train is not None:
                 log_ml = gp_joint_marginal_likelihood(X_train, y_train, K_train, noise,
-                                                     Phi_train, mean_reg, poly_degree)
+                                                     Phi_train, mean_reg)
             else:
                 log_ml = gp_marginal_likelihood(X_train, y_train, K_train, noise)
 
@@ -929,7 +927,7 @@ def _(cho_factor, cho_solve, np):
 
         return optimized_params, log_ml
 
-    def fit_gp_numpy(X_train, y_train, X_test, kernel_type='rbf', use_polynomial_mean=False, poly_degree=None, joint_inference=False, mean_regularization_strength=0.1, **kernel_params):
+    def fit_gp_numpy(X_train, y_train, X_test, kernel_type='rbf', use_basis_mean=False, Phi_train=None, Phi_test=None, joint_inference=False, mean_regularization_strength=0.1, **kernel_params):
         """
         Fit GP using pure numpy/scipy
 
@@ -939,16 +937,17 @@ def _(cho_factor, cho_solve, np):
         y_train : array (n_train,)
         X_test : array (n_test,)
         kernel_type : str, one of 'rbf', 'bump', 'polynomial'
-        use_polynomial_mean : bool, whether to use polynomial mean function
-        poly_degree : int, degree of polynomial mean function
+        use_basis_mean : bool, whether to use basis mean function
+        Phi_train : array (n_train, n_basis) or None - pre-computed basis features for training
+        Phi_test : array (n_test, n_basis) or None - pre-computed basis features for testing
         joint_inference : bool, if True do joint Bayesian inference over mean params and GP
         **kernel_params : kernel hyperparameters
 
         Returns:
         --------
-        y_mean : array (n_test,) - full GP predictions (with polynomial mean added back)
+        y_mean : array (n_test,) - full GP predictions (with basis mean added back)
         y_std : array (n_test,) - total uncertainty (GP + mean if joint inference)
-        poly_mean : array (n_test,) or None - polynomial mean function (for plotting)
+        basis_mean : array (n_test,) or None - basis mean function (for plotting)
         y_std_gp : array (n_test,) or None - GP uncertainty component only (for joint inference)
         y_std_mean : array (n_test,) or None - mean uncertainty component only (for joint inference)
         """
@@ -956,41 +955,29 @@ def _(cho_factor, cho_solve, np):
         y_train = np.atleast_1d(y_train).reshape(-1)
         X_test = np.atleast_1d(X_test).reshape(-1)
 
-        # Polynomial mean function (if requested)
-        if use_polynomial_mean and poly_degree is not None:
-            from sklearn.preprocessing import PolynomialFeatures
+        # Basis mean function (if requested)
+        if use_basis_mean and Phi_train is not None and Phi_test is not None:
             from sklearn.linear_model import BayesianRidge
 
-            # Create polynomial features
-            poly = PolynomialFeatures(degree=poly_degree, include_bias=True)
-            Phi_train = poly.fit_transform(X_train.reshape(-1, 1))
-            Phi_test = poly.transform(X_test.reshape(-1, 1))
-
             if joint_inference:
-                # Joint Bayesian inference: marginalize over polynomial coefficients
+                # Joint Bayesian inference: marginalize over basis coefficients
                 # Model: y = Φβ + f + ε
                 # where β ~ N(0, λ⁻¹I), f ~ GP(0, K), ε ~ N(0, σ²I)
                 #
                 # Marginal: y ~ N(0, ΦΛ⁻¹Φᵀ + K + σ²I)
                 # This integrates out uncertainty in β!
 
-                # Prior precision for polynomial coefficients
-                # Use degree-adaptive regularization to prevent numerical issues
-                # Higher degree → stronger regularization (smaller prior variance)
-                # This prevents the polynomial contribution from dominating
-                # User-controlled base strength * degree-adaptive scaling
-                lambda_prior = mean_regularization_strength * (poly_degree / 3.0)  # Increases with degree
+                # Prior precision for basis coefficients
+                lambda_prior = mean_regularization_strength
                 Lambda_inv = (1.0 / lambda_prior) * np.eye(Phi_train.shape[1])
 
-                # Normalize polynomial features to improve conditioning
-                # This is crucial for numerical stability with high-degree polynomials
+                # Normalize basis features to improve conditioning
                 Phi_train_std = np.std(Phi_train, axis=0, keepdims=True)
                 Phi_train_std[Phi_train_std < 1e-10] = 1.0  # Avoid division by zero
                 Phi_train_normalized = Phi_train / Phi_train_std
                 Phi_test_normalized = Phi_test / Phi_train_std
 
                 # Update Lambda_inv to account for normalization
-                # After normalization, we need to adjust the prior accordingly
                 Lambda_inv_normalized = Lambda_inv / (Phi_train_std.T @ Phi_train_std + 1e-10)
 
                 # Store normalized features for joint inference
@@ -999,25 +986,24 @@ def _(cho_factor, cho_solve, np):
                 Lambda_inv = Lambda_inv_normalized
 
                 # Posterior mean will be computed after we have K_total
-                # We need to defer this until after kernel matrices are computed
-                use_polynomial_mean = True
+                use_basis_mean = True
                 y_train_residual = None  # Not used in joint path
                 mean_test = None  # Will be computed in joint inference path after seeing data
             else:
-                # Sequential inference: fit polynomial first (point estimate)
-                poly_model = BayesianRidge(fit_intercept=False)
-                poly_model.fit(Phi_train, y_train)
+                # Sequential inference: fit basis model first (point estimate)
+                basis_model = BayesianRidge(fit_intercept=False)
+                basis_model.fit(Phi_train, y_train)
 
-                # Get polynomial predictions
-                mean_train = poly_model.predict(Phi_train)
-                mean_test = poly_model.predict(Phi_test)
+                # Get basis mean predictions
+                mean_train = basis_model.predict(Phi_train)
+                mean_test = basis_model.predict(Phi_test)
 
                 # Subtract mean from training data (fit GP on residuals)
                 y_train_residual = y_train - mean_train
         else:
             y_train_residual = y_train
             mean_test = np.zeros_like(X_test)
-            use_polynomial_mean = False  # Track if we're using it for return value
+            use_basis_mean = False  # Track if we're using it for return value
             joint_inference = False  # Not using joint inference
 
         # Get noise level
@@ -1062,7 +1048,7 @@ def _(cho_factor, cho_solve, np):
             raise ValueError(f"Unknown kernel type: {kernel_type}")
 
         try:
-            if joint_inference and use_polynomial_mean:
+            if joint_inference and use_basis_mean:
                 # Joint Bayesian inference path
                 # Build total covariance: K_total = ΦΛ⁻¹Φᵀ + K_GP + σ²I
                 K_beta = Phi_train @ Lambda_inv @ Phi_train.T  # Uncertainty from β
@@ -1152,7 +1138,7 @@ def _(cho_factor, cho_solve, np):
 
                 # Return polynomial mean for plotting (None if not using it)
                 # Sequential inference doesn't separate uncertainty components
-                return y_mean, y_std, (mean_test if use_polynomial_mean and not joint_inference else None), None, None
+                return y_mean, y_std, (mean_test if use_basis_mean and not joint_inference else None), None, None
 
         except Exception as e:
             print(f"Error in GP fitting with {kernel_type} kernel: {e}")
@@ -1347,14 +1333,16 @@ def _(
     g,
     gaussian_log_likelihood_per_point,
     get_P,
+    get_basis_lengthscale,
+    get_basis_type,
     get_calib_frac,
+    get_filter_invert,
     get_filter_max,
     get_filter_min,
     get_gp_joint_inference,
     get_gp_kernel_type,
     get_gp_lengthscale,
     get_gp_mean_regularization,
-    get_gp_poly_mean_degree,
     get_gp_support_radius,
     get_last_enabled_method,
     get_leverage_percentile,
@@ -1373,7 +1361,7 @@ def _(
     gp_loo_log_likelihood,
     gp_marginal_likelihood,
     gp_regression,
-    gp_use_poly_mean,
+    gp_use_basis_mean,
     matern_kernel,
     mo,
     neural_network,
@@ -1389,7 +1377,11 @@ def _(
 ):
     def get_data(N_samples=500, sigma=0.1, function_type='sin'):
         x_train = np.append(np.random.uniform(-10, 10, size=N_samples), np.linspace(-10, 10, 2))
-        x_train = x_train[(x_train < get_filter_min()) | (x_train > get_filter_max())]
+        # Filter: normal = exclude inside range, inverted = keep only inside range
+        if get_filter_invert():
+            x_train = x_train[(x_train >= get_filter_min()) & (x_train <= get_filter_max())]
+        else:
+            x_train = x_train[(x_train < get_filter_min()) | (x_train > get_filter_max())]
         x_train = np.sort(x_train)
         y_train = g(x_train, noise_variance=sigma**2, function_type=function_type)
         X_train = x_train[:, None]
@@ -1399,6 +1391,60 @@ def _(
         X_test = x_test[:, None]
 
         return X_train, y_train, X_test, y_test
+
+    def make_rbf_features(X, n_basis, x_min, x_max, lengthscale=None):
+        """Create RBF basis features with evenly spaced centers."""
+        centers = np.linspace(x_min, x_max, n_basis)
+        if lengthscale is None:
+            spacing = (x_max - x_min) / (n_basis - 1) if n_basis > 1 else 1.0
+            sigma = spacing * 0.5  # Width parameter
+        else:
+            sigma = lengthscale
+        x = X[:, 0]
+        features = np.column_stack([
+            np.exp(-((x - c)**2) / (2 * sigma**2)) for c in centers
+        ])
+        return features, centers, sigma
+
+    def make_fourier_features(X, n_basis, x_min, x_max, lengthscale=None):
+        """Create Fourier basis features (1, sin, cos pairs)."""
+        if lengthscale is None:
+            L = (x_max - x_min) / 2  # Half-period
+        else:
+            L = lengthscale
+        x = X[:, 0]
+        features = [np.ones(len(x))]  # Constant term
+        freq = 1
+        while len(features) < n_basis:
+            features.append(np.sin(freq * np.pi * x / L))
+            if len(features) < n_basis:
+                features.append(np.cos(freq * np.pi * x / L))
+            freq += 1
+        return np.column_stack(features[:n_basis]), L
+
+    def make_lj_features(X, n_basis, x_min, x_max):
+        """Create LJ-inspired basis features with 1/r^12, 1/r^6, and inverse powers."""
+        offset = 1.5
+        x = X[:, 0]
+        # Use same mapping as LJ ground truth: r = x/5 + offset
+        r = x / 5.0 + offset
+        r = np.maximum(r, 0.1)  # Safety clamp
+
+        features = []
+        # Order: 1/r^12 (repulsive), constant, 1/r^6 (attractive), then inverse powers
+        if n_basis >= 1:
+            features.append(np.ones(len(r)))  # Constant for vertical offset
+        if n_basis >= 2:
+            features.append(1.0 / r**12)  # Repulsive term
+        if n_basis >= 3:
+            features.append(1.0 / r**6)   # Attractive term
+        # Additional inverse power terms: 1/r, 1/r^2, 1/r^3, ...
+        power = 1
+        while len(features) < n_basis:
+            features.append(1.0 / r**power)
+            power += 1
+
+        return np.column_stack(features[:n_basis]), offset
 
     fig, ax = plt.subplots(figsize=(14, 5))
     np.random.seed(seed.value)
@@ -1417,10 +1463,38 @@ def _(
     X_train, X_calib, y_train, y_calib = train_test_split(X_data, y_data, test_size=get_calib_frac(), random_state=get_seed())
     n = len(y_calib)
 
-    poly = PolynomialFeatures(degree=get_P()-1, include_bias=True)
-    Phi_train = poly.fit_transform(X_train)
-    Phi_test = poly.transform(X_test)
-    Phi_calib = poly.transform(X_calib)
+    # Create basis features based on selected type
+    basis_type = get_basis_type()
+    P = get_P()
+    x_min, x_max = X_train[:, 0].min(), X_train[:, 0].max()
+
+    # Store basis parameters for visualization
+    rbf_centers, rbf_sigma, fourier_L, lj_offset = None, None, None, None
+
+    if basis_type == 'polynomial':
+        poly = PolynomialFeatures(degree=P-1, include_bias=True)
+        Phi_train = poly.fit_transform(X_train)
+        Phi_test = poly.transform(X_test)
+        Phi_calib = poly.transform(X_calib)
+    elif basis_type == 'rbf':
+        _lengthscale = get_basis_lengthscale()
+        Phi_train, rbf_centers, rbf_sigma = make_rbf_features(X_train, P, x_min, x_max, _lengthscale)
+        Phi_test, _, _ = make_rbf_features(X_test, P, x_min, x_max, _lengthscale)
+        Phi_calib, _, _ = make_rbf_features(X_calib, P, x_min, x_max, _lengthscale)
+    elif basis_type == 'fourier':
+        _lengthscale = get_basis_lengthscale()
+        Phi_train, fourier_L = make_fourier_features(X_train, P, x_min, x_max, _lengthscale)
+        Phi_test, _ = make_fourier_features(X_test, P, x_min, x_max, _lengthscale)
+        Phi_calib, _ = make_fourier_features(X_calib, P, x_min, x_max, _lengthscale)
+    elif basis_type == 'lj':
+        # Restrict test domain to near training data (avoid singularity and extrapolation issues)
+        _valid_mask = X_test[:, 0] >= x_min - 2.0  # 2.0 margin before training data
+        X_test = X_test[_valid_mask]
+        y_test = y_test[_valid_mask]
+        # Compute basis (offset=1.5 is hard-coded in make_lj_features to match ground truth)
+        Phi_train, _ = make_lj_features(X_train, P, x_min, x_max)
+        Phi_test, _ = make_lj_features(X_test, P, x_min, x_max)
+        Phi_calib, _ = make_lj_features(X_calib, P, x_min, x_max)
 
     b = MyBayesianRidge(fit_intercept=False)
     # Try new API with posterior parameter, fall back to old API for WASM compatibility
@@ -1495,8 +1569,9 @@ def _(
                 degree=get_P(),
                 sigma=1.0,
                 noise=sigma.value**2,
-                use_polynomial_mean=gp_use_poly_mean.value,
-                poly_degree=get_gp_poly_mean_degree(),
+                use_basis_mean=gp_use_basis_mean.value,
+                Phi_train=Phi_train if gp_use_basis_mean.value else None,
+                Phi_test=Phi_test if gp_use_basis_mean.value else None,
                 joint_inference=get_gp_joint_inference(),
                 mean_regularization_strength=get_gp_mean_regularization()
             )
@@ -1621,16 +1696,20 @@ def _(
                 X_train[:, 0], y_train, X_train[:, 0],
                 kernel_type=get_gp_kernel_type(), lengthscale=get_gp_lengthscale(),
                 support_radius=get_gp_support_radius(), degree=get_P(), sigma=1.0,
-                noise=sigma.value**2, use_polynomial_mean=gp_use_poly_mean.value,
-                poly_degree=get_gp_poly_mean_degree(), joint_inference=get_gp_joint_inference(),
+                noise=sigma.value**2, use_basis_mean=gp_use_basis_mean.value,
+                Phi_train=Phi_train if gp_use_basis_mean.value else None,
+                Phi_test=Phi_train if gp_use_basis_mean.value else None,
+                joint_inference=get_gp_joint_inference(),
                 mean_regularization_strength=get_gp_mean_regularization()
             )[:2]
             y_pred_calib, y_std_calib = fit_gp_numpy(
                 X_train[:, 0], y_train, X_calib[:, 0],
                 kernel_type=get_gp_kernel_type(), lengthscale=get_gp_lengthscale(),
                 support_radius=get_gp_support_radius(), degree=get_P(), sigma=1.0,
-                noise=sigma.value**2, use_polynomial_mean=gp_use_poly_mean.value,
-                poly_degree=get_gp_poly_mean_degree(), joint_inference=get_gp_joint_inference(),
+                noise=sigma.value**2, use_basis_mean=gp_use_basis_mean.value,
+                Phi_train=Phi_train if gp_use_basis_mean.value else None,
+                Phi_test=Phi_calib if gp_use_basis_mean.value else None,
+                joint_inference=get_gp_joint_inference(),
                 mean_regularization_strength=get_gp_mean_regularization()
             )[:2]
             # Add aleatoric uncertainty if GP aleatoric checkbox is enabled
@@ -1743,30 +1822,48 @@ def _(
             axins.axvline(0, color='k', lw=0.5, alpha=0.3)
 
         elif show_linear_inset:
-            # Plot all polynomial basis functions
-            x_basis = np.linspace(-1, 1, 100)
-            P_degree = get_P()
-
-            # Use colormap for varying colors
+            # Plot basis functions using the same make_*_features functions
             import matplotlib
+            P_degree = get_P()
             cmap = matplotlib.colormaps['viridis']
-            colors = [cmap(i / P_degree) for i in range(P_degree + 1)]
 
-            for i in range(P_degree + 1):
-                y_basis = x_basis ** i
-                # Use thinner lines for higher degrees to reduce clutter
-                lw = 1.2 if i < 4 else 0.8
-                alpha = 0.8 if i < 4 else 0.5
-                axins.plot(x_basis, y_basis, color=colors[i], lw=lw, alpha=alpha)
+            # Create inset x range
+            if basis_type == 'polynomial':
+                x_inset = np.linspace(-1, 1, 200)
+            else:
+                x_inset = np.linspace(x_min, x_max, 200)
+            X_inset = x_inset[:, None]
+
+            # Get basis features using the same functions as the main computation
+            if basis_type == 'polynomial':
+                _poly_inset = PolynomialFeatures(degree=P_degree-1, include_bias=True)
+                Phi_inset = _poly_inset.fit_transform(X_inset)
+                axins.set_title(f'Polynomial (P={P_degree})', fontsize=9, pad=3)
+            elif basis_type == 'rbf' and rbf_sigma is not None:
+                Phi_inset, _, _ = make_rbf_features(X_inset, P_degree, x_min, x_max, rbf_sigma)
+                axins.set_title(f'RBF (P={P_degree})', fontsize=9, pad=3)
+            elif basis_type == 'fourier' and fourier_L is not None:
+                Phi_inset, _ = make_fourier_features(X_inset, P_degree, x_min, x_max, fourier_L)
+                axins.set_title(f'Fourier (P={P_degree})', fontsize=9, pad=3)
+            elif basis_type == 'lj':
+                Phi_inset, _ = make_lj_features(X_inset, P_degree, x_min, x_max)
+                axins.set_title(f'LJ (P={P_degree})', fontsize=9, pad=3)
+            else:
+                Phi_inset = None
+
+            # Plot each basis function
+            if Phi_inset is not None:
+                for _j in range(Phi_inset.shape[1]):
+                    y_basis = Phi_inset[:, _j]
+                    # Normalize for display (scale to [0, 1] range)
+                    if np.max(np.abs(y_basis)) > 0:
+                        y_basis = y_basis / np.max(np.abs(y_basis))
+                    axins.plot(x_inset, y_basis, color=cmap(_j / max(1, P_degree - 1)), lw=0.9, alpha=0.7)
 
             axins.set_xlabel('$x$', fontsize=8)
             axins.set_ylabel('Basis', fontsize=8)
-            axins.set_title(f'Polynomial basis (P={P_degree})', fontsize=9, pad=3)
             axins.tick_params(labelsize=7)
             axins.grid(True, alpha=0.3, linewidth=0.5)
-            # Add text labels for first and last basis
-            axins.text(0.95, 0.05, '$x^0$', transform=axins.transAxes, fontsize=6, ha='right', va='bottom')
-            axins.text(0.95, 0.95, f'$x^{{{P_degree}}}$', transform=axins.transAxes, fontsize=6, ha='right', va='top')
 
     # Compute metrics for all active methods
     metrics_dict = {}
@@ -1862,14 +1959,17 @@ def _(
     bayesian,
     conformal,
     get_N_samples,
+    get_basis_lengthscale,
+    get_basis_ls_enabled,
+    get_basis_type,
     get_calib_frac,
+    get_filter_invert,
     get_filter_max,
     get_filter_min,
     get_function_type,
     get_gp_joint_inference,
     get_gp_kernel_type,
     get_gp_mean_regularization,
-    get_gp_poly_mean_degree,
     get_leverage_percentile,
     get_nn_activation,
     get_nn_ensemble_method,
@@ -1886,7 +1986,7 @@ def _(
     get_zeta,
     gp_optimize_button,
     gp_regression,
-    gp_use_poly_mean,
+    gp_use_basis_mean,
     mo,
     neural_network,
     np,
@@ -1894,7 +1994,11 @@ def _(
     quantile,
     set_N_samples,
     set_P,
+    set_basis_lengthscale,
+    set_basis_ls_enabled,
+    set_basis_type,
     set_calib_frac,
+    set_filter_invert,
     set_filter_max,
     set_filter_min,
     set_function_type,
@@ -1902,7 +2006,6 @@ def _(
     set_gp_kernel_type,
     set_gp_lengthscale,
     set_gp_mean_regularization,
-    set_gp_poly_mean_degree,
     set_gp_support_radius,
     set_leverage_percentile,
     set_nn_activation,
@@ -1933,6 +2036,7 @@ def _(
             'sinc',
             'step',
             'runge',
+            'lj',
         ],
         label='Ground truth function',
         value=get_function_type(),
@@ -1947,6 +2051,7 @@ def _(
         label='Filter range',
         on_change=lambda v: (set_filter_min(v[0]), set_filter_max(v[1]))
     )
+    filter_invert = mo.ui.checkbox(get_filter_invert(), label="Keep inside (invert)", on_change=set_filter_invert)
 
     # Regression parameters with conditional styling
     reg_enabled = bayesian.value or conformal.value or pops.value or quantile.value
@@ -1954,13 +2059,29 @@ def _(
     if reg_enabled:
         # Use fixed default value (not state) to avoid circular dependency
         # Manual slider changes still update state via on_change, but slider doesn't react to state changes
-        P_slider = mo.ui.slider(5, 15, 1, 10, label="Degree $P$", on_change=set_P)
+        P_slider = mo.ui.slider(1, 15, 1, 10, label="Parameters $P$", on_change=set_P)
         P_elem = P_slider  # For display
+        def on_basis_type_change(v):
+            set_basis_type(v)
+            set_basis_ls_enabled(v in ['rbf', 'fourier', 'lj'])
+        basis_dropdown = mo.ui.dropdown(
+            options=['polynomial', 'rbf', 'fourier', 'lj'],
+            value=get_basis_type(),
+            label='Basis type',
+            on_change=on_basis_type_change
+        )
+        # Lengthscale slider - enabled for RBF/Fourier, disabled for polynomial
+        if get_basis_ls_enabled():
+            basis_lengthscale_slider = mo.ui.slider(0.5, 10.0, 0.5, get_basis_lengthscale(), label='Basis lengthscale', on_change=set_basis_lengthscale)
+        else:
+            basis_lengthscale_slider = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.5, 10.0, 0.5, get_basis_lengthscale(), label='Basis lengthscale', disabled=True)}</div>")
         aleatoric = mo.ui.checkbox(False, label="Include aleatoric uncertainty")
         reg_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>")
     else:
         P_slider = None  # No slider when disabled
         P_elem = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 15, 1, 10, label='Degree $P$', disabled=True, on_change=set_P)}</div>")
+        basis_dropdown = mo.Html(f"<div style='opacity: 0.4;'><label style='font-size: 0.875rem;'>Basis type</label><br><select disabled style='width: 100%; padding: 4px;'><option>{get_basis_type()}</option></select></div>")
+        basis_lengthscale_slider = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.5, 10.0, 0.5, 2.0, label='Basis lengthscale', disabled=True)}</div>")
         aleatoric = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Include aleatoric uncertainty', disabled=True)}</div>")
         reg_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
 
@@ -2011,10 +2132,9 @@ def _(
         gp_lengthscale_slider = mo.ui.slider(0.1, 5.0, 0.1, 0.5, label='Lengthscale', on_change=set_gp_lengthscale)
         gp_support_radius_slider = mo.ui.slider(0.5, 5.0, 0.1, 1.5, label='Support radius (bump only)', on_change=set_gp_support_radius)
 
-        # gp_use_poly_mean checkbox is now created in a separate cell and passed in as dependency
+        # gp_use_basis_mean checkbox is now created in a separate cell and passed in as dependency
         # We can check its .value here to conditionally show controls
-        if gp_use_poly_mean.value:
-            gp_poly_mean_degree = mo.ui.slider(1, 15, 1, get_gp_poly_mean_degree(), label='Mean polynomial degree', on_change=set_gp_poly_mean_degree)
+        if gp_use_basis_mean.value:
             gp_joint_inference = mo.ui.checkbox(get_gp_joint_inference(), label="Joint Bayesian inference", on_change=set_gp_joint_inference)
             # Log-scale slider for mean regularization (better range control)
             # Maps -6 to 1 in log10 space → 10^-6 to 10^1 = 0.000001 to 10
@@ -2022,7 +2142,6 @@ def _(
             gp_mean_regularization_log = mo.ui.slider(-6, 1, 0.1, _log_reg, label='Mean regularization (log₁₀)', on_change=lambda v: set_gp_mean_regularization(10**v))
             gp_mean_regularization = gp_mean_regularization_log  # For layout
         else:
-            gp_poly_mean_degree = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(1, 15, 1, get_gp_poly_mean_degree(), label='Mean polynomial degree', disabled=True)}</div>")
             gp_joint_inference = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(get_gp_joint_inference(), label='Joint Bayesian inference', disabled=True)}</div>")
             _log_reg = np.log10(get_gp_mean_regularization())
             gp_mean_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 1, 0.1, _log_reg, label='Mean regularization (log₁₀)', disabled=True)}</div>")
@@ -2032,8 +2151,8 @@ def _(
         gp_opt_button_elem = gp_optimize_button
         # Add horizontal separator between kernel hyperparameters and mean function controls
         gp_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>")
-        # Show gp_use_poly_mean checkbox normally when GP regression is enabled
-        gp_use_poly_mean_elem = gp_use_poly_mean
+        # Show gp_use_basis_mean checkbox normally when GP regression is enabled
+        gp_use_basis_mean_elem = gp_use_basis_mean
     else:
         aleatoric_gp = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Include aleatoric uncertainty', disabled=True)}</div>")
         # Dropdown doesn't have disabled attribute, just show greyed out
@@ -2043,9 +2162,8 @@ def _(
         gp_lengthscale = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.1, 5.0, 0.1, 0.5, label='Lengthscale', disabled=True)}</div>")
         gp_support_radius = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.5, 5.0, 0.1, 1.5, label='Support radius (bump only)', disabled=True)}</div>")
         gp_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
-        # Wrap gp_use_poly_mean checkbox with disabled styling when GP regression is off
-        gp_use_poly_mean_elem = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{gp_use_poly_mean}</div>")
-        gp_poly_mean_degree = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(1, 10, 1, 3, label='Mean polynomial degree', disabled=True)}</div>")
+        # Wrap gp_use_basis_mean checkbox with disabled styling when GP regression is off
+        gp_use_basis_mean_elem = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{gp_use_basis_mean}</div>")
         gp_joint_inference = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Joint Bayesian inference', disabled=True)}</div>")
         gp_mean_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 1, 0.1, -1, label='Mean regularization (log₁₀)', disabled=True)}</div>")
         gp_opt_button_elem = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.button(label='Optimize hyperparameters', disabled=True)}</div>")
@@ -2086,7 +2204,7 @@ def _(
 
     linear_col1 = mo.vstack([
         shared_label,
-        P_elem, aleatoric,
+        P_elem, basis_dropdown, basis_lengthscale_slider, aleatoric,
         mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd;'>"),
         mo.left(bayesian),
         mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>"),
@@ -2125,8 +2243,8 @@ def _(
     ])
 
     kernel_col2 = mo.vstack([
-        gp_use_poly_mean_elem,
-        gp_poly_mean_degree, gp_joint_inference, gp_mean_regularization
+        gp_use_basis_mean_elem,
+        gp_joint_inference, gp_mean_regularization
     ])
 
     kernel_methods_tab = mo.Html(f'''
@@ -2159,7 +2277,7 @@ def _(
     # Two-column layout: Dataset parameters on left, Tabs on right
     dataset_column = mo.Html(f'''
     <div style="width: 30%; min-width: 200px;">
-        {mo.vstack([data_label, function_dropdown, N_samples, filter_range, sigma, seed])}
+        {mo.vstack([data_label, function_dropdown, N_samples, filter_range, filter_invert, sigma, seed])}
     </div>
     ''')
 
@@ -2362,12 +2480,12 @@ def _(mo, set_last_enabled_method):
                                     on_change=lambda v: set_last_enabled_method('gp') if v else None)
     neural_network = mo.ui.checkbox(False, label="<b>Neural network</b>",
                                      on_change=lambda v: set_last_enabled_method('nn') if v else None)
-    gp_use_poly_mean = mo.ui.checkbox(False, label="Use polynomial mean function")
+    gp_use_basis_mean = mo.ui.checkbox(False, label="Use linear basis mean function")
     return (
         bayesian,
         conformal,
         gp_regression,
-        gp_use_poly_mean,
+        gp_use_basis_mean,
         neural_network,
         pops,
         quantile,
@@ -2389,8 +2507,12 @@ def _(mo):
     get_seed, set_seed = mo.state(0)
     get_filter_min, set_filter_min = mo.state(0.0)
     get_filter_max, set_filter_max = mo.state(5.0)
+    get_filter_invert, set_filter_invert = mo.state(False)
     get_function_type, set_function_type = mo.state('sin')
     get_P, set_P = mo.state(10)
+    get_basis_type, set_basis_type = mo.state('polynomial')
+    get_basis_lengthscale, set_basis_lengthscale = mo.state(1.5)  # Default matches LJ ground truth offset
+    get_basis_ls_enabled, set_basis_ls_enabled = mo.state(False)  # True for rbf/fourier
     get_calib_frac, set_calib_frac = mo.state(0.2)
     get_zeta, set_zeta = mo.state(0.05)
     get_percentile_clipping, set_percentile_clipping = mo.state(0)
@@ -2401,8 +2523,7 @@ def _(mo):
     get_gp_kernel_type, set_gp_kernel_type = mo.state('rbf')
     get_gp_lengthscale, set_gp_lengthscale = mo.state(0.5)
     get_gp_support_radius, set_gp_support_radius = mo.state(1.5)
-    # gp_use_poly_mean is now a simple checkbox without state (created in analysis checkboxes cell)
-    get_gp_poly_mean_degree, set_gp_poly_mean_degree = mo.state(3)
+    # gp_use_basis_mean is now a simple checkbox without state (created in analysis checkboxes cell)
     get_gp_joint_inference, set_gp_joint_inference = mo.state(False)
     get_gp_mean_regularization, set_gp_mean_regularization = mo.state(0.1)
 
@@ -2427,7 +2548,11 @@ def _(mo):
     return (
         get_N_samples,
         get_P,
+        get_basis_lengthscale,
+        get_basis_ls_enabled,
+        get_basis_type,
         get_calib_frac,
+        get_filter_invert,
         get_filter_max,
         get_filter_min,
         get_function_type,
@@ -2435,7 +2560,6 @@ def _(mo):
         get_gp_kernel_type,
         get_gp_lengthscale,
         get_gp_mean_regularization,
-        get_gp_poly_mean_degree,
         get_gp_support_radius,
         get_last_enabled_method,
         get_leverage_percentile,
@@ -2454,7 +2578,11 @@ def _(mo):
         get_zeta,
         set_N_samples,
         set_P,
+        set_basis_lengthscale,
+        set_basis_ls_enabled,
+        set_basis_type,
         set_calib_frac,
+        set_filter_invert,
         set_filter_max,
         set_filter_min,
         set_function_type,
@@ -2462,7 +2590,6 @@ def _(mo):
         set_gp_kernel_type,
         set_gp_lengthscale,
         set_gp_mean_regularization,
-        set_gp_poly_mean_degree,
         set_gp_support_radius,
         set_last_enabled_method,
         set_leverage_percentile,
@@ -2487,15 +2614,16 @@ def _(
     N_samples,
     g,
     get_P,
+    get_basis_lengthscale,
+    get_basis_type,
     get_filter_max,
     get_filter_min,
     get_function_type,
     get_gp_kernel_type,
-    get_gp_poly_mean_degree,
     gp_lengthscale_slider,
     gp_optimize_button,
     gp_support_radius_slider,
-    gp_use_poly_mean,
+    gp_use_basis_mean,
     np,
     optimize_gp_hyperparameters,
     seed,
@@ -2525,13 +2653,57 @@ def _(
             'noise': sigma.value**2
         }
 
-        # Get polynomial mean settings
-        _use_poly_mean = gp_use_poly_mean.value
+        # Get basis mean settings
+        _use_basis_mean = gp_use_basis_mean.value
         # Use default values to avoid circular dependency (cell modifies set_gp_mean_regularization)
         _joint_inference = False  # Default: False
-        _poly_degree = get_gp_poly_mean_degree()
         # Use default initial value for mean regularization (will be optimized)
         _mean_reg = 0.1
+
+        # Create basis features if using basis mean
+        _Phi_train = None
+        if _use_basis_mean:
+            _x_min, _x_max = _x_train.min(), _x_train.max()
+            _P = get_P()
+            _basis_type = get_basis_type()
+
+            if _basis_type == 'polynomial':
+                from sklearn.preprocessing import PolynomialFeatures as PF
+                _poly = PF(degree=_P-1, include_bias=True)
+                _Phi_train = _poly.fit_transform(_x_train.reshape(-1, 1))
+            elif _basis_type == 'rbf':
+                _centers = np.linspace(_x_min, _x_max, _P)
+                _sigma_rbf = get_basis_lengthscale()
+                _Phi_train = np.column_stack([
+                    np.exp(-((_x_train - c)**2) / (2 * _sigma_rbf**2)) for c in _centers
+                ])
+            elif _basis_type == 'fourier':
+                _L = get_basis_lengthscale()
+                _features = [np.ones(len(_x_train))]
+                _freq = 1
+                while len(_features) < _P:
+                    _features.append(np.sin(_freq * np.pi * _x_train / _L))
+                    if len(_features) < _P:
+                        _features.append(np.cos(_freq * np.pi * _x_train / _L))
+                    _freq += 1
+                _Phi_train = np.column_stack(_features[:_P])
+            elif _basis_type == 'lj':
+                _offset = 1.5  # Hard-coded to match LJ ground truth
+                _r = _x_train / 5.0 + _offset
+                _r = np.maximum(_r, 0.1)
+                _features = []
+                # Order: constant, 1/r^12, 1/r^6, then inverse powers (matches make_lj_features)
+                if _P >= 1:
+                    _features.append(np.ones(len(_x_train)))  # Constant
+                if _P >= 2:
+                    _features.append(1.0 / _r**12)  # Repulsive
+                if _P >= 3:
+                    _features.append(1.0 / _r**6)   # Attractive
+                _power = 1
+                while len(_features) < _P:
+                    _features.append(1.0 / _r**_power)
+                    _power += 1
+                _Phi_train = np.column_stack(_features[:_P])
 
         # Optimize
         opt_lengthscale = None  # Initialize variables used in output formatting
@@ -2542,8 +2714,8 @@ def _(
         try:
             optimized_params, log_ml = optimize_gp_hyperparameters(
                 _x_train, _y_train, get_gp_kernel_type(), initial_params, max_iter=50,
-                use_polynomial_mean=_use_poly_mean,
-                poly_degree=_poly_degree,
+                use_basis_mean=_use_basis_mean,
+                Phi_train=_Phi_train,
                 joint_inference=_joint_inference,
                 mean_regularization_strength=_mean_reg
             )
