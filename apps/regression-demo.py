@@ -15,7 +15,7 @@
 
 import marimo
 
-__generated_with = "0.18.0"
+__generated_with = "0.18.1"
 app = marimo.App(width="full")
 
 
@@ -50,7 +50,7 @@ def _(mo):
         /* Dashboard section - fixed height with internal scrolling if needed */
         .app-dashboard {
             flex-shrink: 0;
-            max-height: 35vh;
+            max-height: 40vh;
             overflow-y: auto;
             padding: 10px;
             background-color: #f8f9fa;
@@ -1357,6 +1357,7 @@ def _(
     get_gp_poly_mean_degree,
     get_gp_support_radius,
     get_last_enabled_method,
+    get_leverage_percentile,
     get_nn_activation,
     get_nn_ensemble_method,
     get_nn_ensemble_size,
@@ -1365,7 +1366,6 @@ def _(
     get_nn_regularization,
     get_percentile_clipping,
     get_pops_posterior,
-    get_leverage_percentile,
     get_quantile_confidence,
     get_quantile_regularization,
     get_seed,
@@ -1870,6 +1870,7 @@ def _(
     get_gp_kernel_type,
     get_gp_mean_regularization,
     get_gp_poly_mean_degree,
+    get_leverage_percentile,
     get_nn_activation,
     get_nn_ensemble_method,
     get_nn_ensemble_size,
@@ -1878,7 +1879,6 @@ def _(
     get_nn_regularization,
     get_percentile_clipping,
     get_pops_posterior,
-    get_leverage_percentile,
     get_quantile_confidence,
     get_quantile_regularization,
     get_seed,
@@ -1904,6 +1904,7 @@ def _(
     set_gp_mean_regularization,
     set_gp_poly_mean_degree,
     set_gp_support_radius,
+    set_leverage_percentile,
     set_nn_activation,
     set_nn_ensemble_method,
     set_nn_ensemble_size,
@@ -1912,7 +1913,6 @@ def _(
     set_nn_regularization,
     set_percentile_clipping,
     set_pops_posterior,
-    set_leverage_percentile,
     set_quantile_confidence,
     set_quantile_regularization,
     set_seed,
@@ -2438,6 +2438,7 @@ def _(mo):
         get_gp_poly_mean_degree,
         get_gp_support_radius,
         get_last_enabled_method,
+        get_leverage_percentile,
         get_nn_activation,
         get_nn_ensemble_method,
         get_nn_ensemble_size,
@@ -2446,7 +2447,6 @@ def _(mo):
         get_nn_regularization,
         get_percentile_clipping,
         get_pops_posterior,
-        get_leverage_percentile,
         get_quantile_confidence,
         get_quantile_regularization,
         get_seed,
@@ -2465,6 +2465,7 @@ def _(mo):
         set_gp_poly_mean_degree,
         set_gp_support_radius,
         set_last_enabled_method,
+        set_leverage_percentile,
         set_nn_activation,
         set_nn_ensemble_method,
         set_nn_ensemble_size,
@@ -2473,7 +2474,6 @@ def _(mo):
         set_nn_regularization,
         set_percentile_clipping,
         set_pops_posterior,
-        set_leverage_percentile,
         set_quantile_confidence,
         set_quantile_regularization,
         set_seed,
