@@ -111,7 +111,7 @@ def _():
 
 @app.cell
 def _(np):
-    def g(X, noise_variance, function_type='sin'):
+    def g(X, noise_variance, function_type='sin', custom_code=None):
         """Generate data from different ground truth functions"""
         if function_type == 'sin':
             y = np.sin(X)
@@ -136,6 +136,30 @@ def _(np):
             y = 4.0 * ((sigma / r) ** 12 - (sigma / r) ** 6)
             # Clip extreme values for display
             y = np.clip(y, -1.5, 1.5)
+        elif function_type == 'custom':
+            # Execute user code in restricted namespace
+            import math
+            import scipy
+            # Safe subset of builtins needed for basic operations
+            safe_builtins = {
+                'range': range, 'len': len, 'sum': sum, 'min': min, 'max': max,
+                'abs': abs, 'round': round, 'int': int, 'float': float,
+                'list': list, 'tuple': tuple, 'zip': zip, 'enumerate': enumerate,
+                'True': True, 'False': False, 'None': None, 'print': print,
+            }
+            try:
+                namespace = {'np': np, 'scipy': scipy, 'math': math, 'X': X}
+                exec(custom_code, {"__builtins__": safe_builtins}, namespace)
+                if 'y' not in namespace:
+                    raise ValueError("Code must define 'y'")
+                y = namespace['y']
+                # Validate output shape
+                y = np.atleast_1d(np.asarray(y, dtype=float))
+                if y.shape != X.shape:
+                    y = np.broadcast_to(y, X.shape).copy()
+            except Exception:
+                # Return NaN on error - will suppress plotting
+                y = np.full_like(X, np.nan)
         else:
             y = np.sin(X)  # Default to sin
 
@@ -1310,87 +1334,9 @@ def _(mo, qr_base64):
     return
 
 
-@app.cell(hide_code=True)
-def _(
-    ConformalPrediction,
-    MyBayesianRidge,
-    N_samples,
-    NeuralNetworkRegression,
-    POPSRegression,
-    PolynomialFeatures,
-    QuantileRegressionUQ,
-    aleatoric,
-    aleatoric_gp,
-    bayesian,
-    bump_kernel,
-    compute_kernel_matrix,
-    conformal,
-    crps_ensemble,
-    crps_gaussian,
-    crps_quantile_approx,
-    fit_gp_numpy,
-    function_dropdown,
-    g,
-    gaussian_log_likelihood_per_point,
-    get_P,
-    get_basis_lengthscale,
-    get_basis_type,
-    get_calib_frac,
-    get_filter_invert,
-    get_filter_max,
-    get_filter_min,
-    get_gp_joint_inference,
-    get_gp_kernel_type,
-    get_gp_lengthscale,
-    get_gp_mean_regularization,
-    get_gp_support_radius,
-    get_last_enabled_method,
-    get_leverage_percentile,
-    get_nn_activation,
-    get_nn_ensemble_method,
-    get_nn_ensemble_size,
-    get_nn_hidden_units,
-    get_nn_num_layers,
-    get_nn_regularization,
-    get_percentile_clipping,
-    get_pops_posterior,
-    get_quantile_confidence,
-    get_quantile_regularization,
-    get_seed,
-    get_zeta,
-    gp_loo_log_likelihood,
-    gp_marginal_likelihood,
-    gp_regression,
-    gp_use_basis_mean,
-    matern_kernel,
-    mo,
-    neural_network,
-    np,
-    plt,
-    polynomial_kernel,
-    pops,
-    quantile,
-    rbf_kernel,
-    seed,
-    sigma,
-    train_test_split,
-):
-    def get_data(N_samples=500, sigma=0.1, function_type='sin'):
-        x_train = np.append(np.random.uniform(-10, 10, size=N_samples), np.linspace(-10, 10, 2))
-        # Filter: normal = exclude inside range, inverted = keep only inside range
-        if get_filter_invert():
-            x_train = x_train[(x_train >= get_filter_min()) & (x_train <= get_filter_max())]
-        else:
-            x_train = x_train[(x_train < get_filter_min()) | (x_train > get_filter_max())]
-        x_train = np.sort(x_train)
-        y_train = g(x_train, noise_variance=sigma**2, function_type=function_type)
-        X_train = x_train[:, None]
-
-        x_test = np.linspace(-10, 10, 1000)
-        y_test = g(x_test, 0, function_type=function_type)
-        X_test = x_test[:, None]
-
-        return X_train, y_train, X_test, y_test
+@app.cell
+def _(np):
+    """Basis feature functions for linear regression models."""
 
     def make_rbf_features(X, n_basis, x_min, x_max, lengthscale=None):
         """Create RBF basis features with evenly spaced centers."""
@@ -1423,15 +1369,15 @@ def _(
         return np.column_stack(features[:n_basis]), L
 
     def make_lj_features(X, n_basis, x_min, x_max):
-        """Create LJ-inspired basis features with 1/r^12, 1/r^6, and inverse powers."""
-        offset = 1.5
+        """Create LJ-inspired basis features: constant, 1/r^12, 1/r^6, and inverse powers."""
+        offset = 1.5  # Hard-coded to match LJ ground truth
         x = X[:, 0]
         # Use same mapping as LJ ground truth: r = x/5 + offset
         r = x / 5.0 + offset
         r = np.maximum(r, 0.1)  # Safety clamp
 
         features = []
-        # Order: 1/r^12 (repulsive), constant, 1/r^6 (attractive), then inverse powers
+        # Order: constant, 1/r^12 (repulsive), 1/r^6 (attractive), then inverse powers
         if n_basis >= 1:
             features.append(np.ones(len(r)))  # Constant for vertical offset
         if n_basis >= 2:
@@ -1446,10 +1392,130 @@ def _(
 
         return np.column_stack(features[:n_basis]), offset
 
+    def make_custom_features(X, n_basis, custom_code):
+        """Execute user code to create custom basis features."""
+        import math
+        import scipy
+        # Safe subset of builtins needed for basic operations
+        safe_builtins = {
+            'range': range, 'len': len, 'sum': sum, 'min': min, 'max': max,
+            'abs': abs, 'round': round, 'int': int, 'float': float,
+            'list': list, 'tuple': tuple, 'zip': zip, 'enumerate': enumerate,
+            'True': True, 'False': False, 'None': None, 'print': print,
+        }
+        try:
+            namespace = {'np': np, 'scipy': scipy, 'math': math, 'X': X, 'P': n_basis}
+            exec(custom_code, {"__builtins__": safe_builtins}, namespace)
+            if 'features' not in namespace:
+                return None, "Code must define 'features'"
+            features = np.atleast_2d(np.asarray(namespace['features'], dtype=float))
+            # Ensure correct shape (n_samples, n_features)
+            if features.shape[0] != X.shape[0]:
+                features = features.T  # Try transpose
+            # Check for NaN/Inf values
+            if np.any(np.isnan(features)) or np.any(np.isinf(features)):
+                return None, "Features contain NaN or Inf values"
+            return features[:, :n_basis], None  # Match return signature
+        except Exception as e:
+            return None, str(e)  # Return error message instead of crashing
+
+    return make_custom_features, make_fourier_features, make_lj_features, make_rbf_features
+
+
+@app.cell(hide_code=True)
+def _(
+    ConformalPrediction,
+    MyBayesianRidge,
+    N_samples,
+    NeuralNetworkRegression,
+    POPSRegression,
+    PolynomialFeatures,
+    QuantileRegressionUQ,
+    aleatoric,
+    aleatoric_gp,
+    basis_type_dropdown,
+    bayesian,
+    bump_kernel,
+    compute_kernel_matrix,
+    conformal,
+    crps_ensemble,
+    crps_gaussian,
+    crps_quantile_approx,
+    fit_gp_numpy,
+    function_dropdown,
+    g,
+    gaussian_log_likelihood_per_point,
+    get_P,
+    get_basis_lengthscale,
+    get_basis_type,
+    get_calib_frac,
+    get_custom_basis_code,
+    get_custom_function_code,
+    get_filter_invert,
+    get_filter_max,
+    get_filter_min,
+    get_gp_joint_inference,
+    get_gp_kernel_type,
+    get_gp_lengthscale,
+    get_gp_mean_regularization,
+    get_gp_support_radius,
+    get_last_enabled_method,
+    get_leverage_percentile,
+    get_nn_activation,
+    get_nn_ensemble_method,
+    get_nn_ensemble_size,
+    get_nn_hidden_units,
+    get_nn_num_layers,
+    get_nn_regularization,
+    get_percentile_clipping,
+    get_pops_posterior,
+    get_quantile_confidence,
+    get_quantile_regularization,
+    get_seed,
+    get_zeta,
+    gp_loo_log_likelihood,
+    gp_marginal_likelihood,
+    gp_regression,
+    gp_use_basis_mean,
+    make_custom_features,
+    make_fourier_features,
+    make_lj_features,
+    make_rbf_features,
+    matern_kernel,
+    mo,
+    neural_network,
+    np,
+    plt,
+    polynomial_kernel,
+    pops,
+    quantile,
+    rbf_kernel,
+    seed,
+    sigma,
+    train_test_split,
+):
+    def get_data(N_samples=500, sigma=0.1, function_type='sin', custom_code=None):
+        x_train = np.append(np.random.uniform(-10, 10, size=N_samples), np.linspace(-10, 10, 2))
+        # Filter: normal = exclude inside range, inverted = keep only inside range
+        if get_filter_invert():
+            x_train = x_train[(x_train >= get_filter_min()) & (x_train <= get_filter_max())]
+        else:
+            x_train = x_train[(x_train < get_filter_min()) | (x_train > get_filter_max())]
+        x_train = np.sort(x_train)
+        y_train = g(x_train, noise_variance=sigma**2, function_type=function_type, custom_code=custom_code)
+        X_train = x_train[:, None]
+
+        x_test = np.linspace(-10, 10, 1000)
+        y_test = g(x_test, 0, function_type=function_type, custom_code=custom_code)
+        X_test = x_test[:, None]
+
+        return X_train, y_train, X_test, y_test
+
     fig, ax = plt.subplots(figsize=(14, 5))
     np.random.seed(seed.value)
     _func_type = function_dropdown.value
-    X_data, y_data, X_test, y_test = get_data(N_samples.value, sigma=sigma.value, function_type=_func_type)
+    _custom_code = get_custom_function_code() if _func_type == 'custom' else None
+    X_data, y_data, X_test, y_test = get_data(N_samples.value, sigma=sigma.value, function_type=_func_type, custom_code=_custom_code)
 
     # Check if filter removed all data
     mo.stop(len(X_data) < 5, mo.md(f"""
@@ -1464,12 +1530,13 @@ def _(
     n = len(y_calib)
 
     # Create basis features based on selected type
-    basis_type = get_basis_type()
+    basis_type = basis_type_dropdown.value if basis_type_dropdown else get_basis_type()
     P = get_P()
     x_min, x_max = X_train[:, 0].min(), X_train[:, 0].max()
 
     # Store basis parameters for visualization
     rbf_centers, rbf_sigma, fourier_L, lj_offset = None, None, None, None
+    _custom_basis_error = None  # Track custom basis errors
 
     if basis_type == 'polynomial':
         poly = PolynomialFeatures(degree=P-1, include_bias=True)
@@ -1495,6 +1562,19 @@ def _(
         Phi_train, _ = make_lj_features(X_train, P, x_min, x_max)
         Phi_test, _ = make_lj_features(X_test, P, x_min, x_max)
         Phi_calib, _ = make_lj_features(X_calib, P, x_min, x_max)
+    elif basis_type == 'custom':
+        _custom_basis_code = get_custom_basis_code()
+        Phi_train, _custom_basis_error = make_custom_features(X_train, P, _custom_basis_code)
+        if Phi_train is None:
+            # Set flag to skip fitting, will just show data points
+            _custom_basis_error = _custom_basis_error or "Unknown error"
+            Phi_train = np.zeros((X_train.shape[0], 1))  # Dummy to avoid crashes
+            Phi_test = np.zeros((X_test.shape[0], 1))
+            Phi_calib = np.zeros((X_calib.shape[0], 1))
+        else:
+            _custom_basis_error = None
+            Phi_test, _ = make_custom_features(X_test, P, _custom_basis_code)
+            Phi_calib, _ = make_custom_features(X_calib, P, _custom_basis_code)
 
     b = MyBayesianRidge(fit_intercept=False)
     # Try new API with posterior parameter, fall back to old API for WASM compatibility
@@ -1537,18 +1617,32 @@ def _(
     method_predictions = {}  # {label: (y_pred, y_std, fit_time)}
 
     models_to_plot = []
-    if bayesian.value:
-        models_to_plot.append((b, Phi_train, Phi_test, 'C2', 'Bayesian uncertainty', True))
-    if conformal.value:
-        models_to_plot.append((c, Phi_train, Phi_test, 'C1', 'Conformal prediction', True))
-    if pops.value:
-        models_to_plot.append((p, Phi_train, Phi_test, 'C0', 'POPS regression', True))
-    if quantile.value:
-        models_to_plot.append((q, Phi_train, Phi_test, 'C4', 'Quantile regression', True))
-    if gp_regression.value:
-        models_to_plot.append((None, X_train, X_test, 'C3', 'GP regression', False))
-    if neural_network.value:
-        models_to_plot.append((None, X_train, X_test, 'C5', 'Neural network', False))
+    # Skip fitting if there's a custom basis error or NaN in training data (custom function error)
+    _has_valid_data = not np.any(np.isnan(y_train))
+
+    # Show warning in plot if there's an error
+    if _custom_basis_error is not None:
+        ax.text(0.5, 0.5, '⚠️ Custom basis error', transform=ax.transAxes,
+                fontsize=14, ha='center', va='center', color='orange',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='orange'))
+    elif not _has_valid_data:
+        ax.text(0.5, 0.5, '⚠️ Custom function error', transform=ax.transAxes,
+                fontsize=14, ha='center', va='center', color='orange',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='orange'))
+
+    if _custom_basis_error is None and _has_valid_data:
+        if bayesian.value:
+            models_to_plot.append((b, Phi_train, Phi_test, 'C2', 'Bayesian uncertainty', True))
+        if conformal.value:
+            models_to_plot.append((c, Phi_train, Phi_test, 'C1', 'Conformal prediction', True))
+        if pops.value:
+            models_to_plot.append((p, Phi_train, Phi_test, 'C0', 'POPS regression', True))
+        if quantile.value:
+            models_to_plot.append((q, Phi_train, Phi_test, 'C4', 'Quantile regression', True))
+        if gp_regression.value:
+            models_to_plot.append((None, X_train, X_test, 'C3', 'GP regression', False))
+        if neural_network.value:
+            models_to_plot.append((None, X_train, X_test, 'C5', 'Neural network', False))
 
     for model_info in models_to_plot:
         if len(model_info) == 6:
@@ -1848,6 +1942,9 @@ def _(
             elif basis_type == 'lj':
                 Phi_inset, _ = make_lj_features(X_inset, P_degree, x_min, x_max)
                 axins.set_title(f'LJ (P={P_degree})', fontsize=9, pad=3)
+            elif basis_type == 'custom':
+                Phi_inset, _ = make_custom_features(X_inset, P_degree, get_custom_basis_code())
+                axins.set_title(f'Custom (P={P_degree})', fontsize=9, pad=3)
             else:
                 Phi_inset = None
 
@@ -1963,6 +2060,8 @@ def _(
     get_basis_ls_enabled,
     get_basis_type,
     get_calib_frac,
+    get_custom_basis_code,
+    get_custom_function_code,
     get_filter_invert,
     get_filter_max,
     get_filter_min,
@@ -1998,6 +2097,8 @@ def _(
     set_basis_ls_enabled,
     set_basis_type,
     set_calib_frac,
+    set_custom_basis_code,
+    set_custom_function_code,
     set_filter_invert,
     set_filter_max,
     set_filter_min,
@@ -2037,6 +2138,7 @@ def _(
             'step',
             'runge',
             'lj',
+            'custom',
         ],
         label='Ground truth function',
         value=get_function_type(),
@@ -2064,12 +2166,15 @@ def _(
         def on_basis_type_change(v):
             set_basis_type(v)
             set_basis_ls_enabled(v in ['rbf', 'fourier', 'lj'])
-        basis_dropdown = mo.ui.dropdown(
-            options=['polynomial', 'rbf', 'fourier', 'lj'],
+        basis_type_dropdown = mo.ui.dropdown(
+            options=['polynomial', 'rbf', 'fourier', 'lj', 'custom'],
             value=get_basis_type(),
-            label='Basis type',
             on_change=on_basis_type_change
         )
+        basis_dropdown = mo.hstack([
+            mo.md("Basis type"),
+            basis_type_dropdown
+        ], justify="space-between", align="center")
         # Lengthscale slider - enabled for RBF/Fourier, disabled for polynomial
         if get_basis_ls_enabled():
             basis_lengthscale_slider = mo.ui.slider(0.5, 10.0, 0.5, get_basis_lengthscale(), label='Basis lengthscale', on_change=set_basis_lengthscale)
@@ -2079,8 +2184,9 @@ def _(
         reg_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>")
     else:
         P_slider = None  # No slider when disabled
-        P_elem = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 15, 1, 10, label='Degree $P$', disabled=True, on_change=set_P)}</div>")
-        basis_dropdown = mo.Html(f"<div style='opacity: 0.4;'><label style='font-size: 0.875rem;'>Basis type</label><br><select disabled style='width: 100%; padding: 4px;'><option>{get_basis_type()}</option></select></div>")
+        P_elem = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 15, 1, 10, label='Parameters $P$', disabled=True, on_change=set_P)}</div>")
+        basis_type_dropdown = None  # Disabled
+        basis_dropdown = mo.Html(f"<div style='opacity: 0.4; display: flex; justify-content: space-between; align-items: center;'><span>Basis type</span><select disabled style='padding: 4px;'><option>{get_basis_type()}</option></select></div>")
         basis_lengthscale_slider = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.5, 10.0, 0.5, 2.0, label='Basis lengthscale', disabled=True)}</div>")
         aleatoric = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Include aleatoric uncertainty', disabled=True)}</div>")
         reg_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
@@ -2197,13 +2303,7 @@ def _(
 
     # Linear Methods tab: Two-column layout
     # First column: Shared settings, Bayesian fit, and Quantile regression
-    if reg_enabled:
-        shared_label = mo.md("*Shared settings:*")
-    else:
-        shared_label = mo.md("*Shared settings (enable a method below):*")
-
     linear_col1 = mo.vstack([
-        shared_label,
         P_elem, basis_dropdown, basis_lengthscale_slider, aleatoric,
         mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd;'>"),
         mo.left(bayesian),
@@ -2267,11 +2367,37 @@ def _(
         nn_regularization, nn_ensemble_size
     ])
 
+    # Custom Function tab: Code editor for custom ground truth
+    custom_code_editor = mo.ui.code_editor(
+        value=get_custom_function_code(),
+        language="python",
+        min_height=200,
+        on_change=set_custom_function_code,
+    )
+    custom_function_tab = mo.vstack([
+        mo.md("Define `y = f(X)`. Available: `np`, `scipy`, `math`, `X`. ⚠️ Avoid infinite loops."),
+        custom_code_editor,
+    ])
+
+    # Custom Basis tab: Code editor for custom basis functions
+    custom_basis_editor = mo.ui.code_editor(
+        value=get_custom_basis_code(),
+        language="python",
+        min_height=200,
+        on_change=set_custom_basis_code,
+    )
+    custom_basis_tab = mo.vstack([
+        mo.md("Define `features` (n×P matrix). Available: `np`, `scipy`, `math`, `X`, `P`. ⚠️ Avoid infinite loops."),
+        custom_basis_editor,
+    ])
+
     # Create tabs for method-specific parameters
     method_params_tabs = mo.ui.tabs({
         "Linear Methods": linear_methods_tab,
         "Kernel Methods": kernel_methods_tab,
-        "Non-linear Methods": nonlinear_methods_tab
+        "Non-linear Methods": nonlinear_methods_tab,
+        "Custom Function": custom_function_tab,
+        "Custom Basis": custom_basis_tab
     })
 
     # Two-column layout: Dataset parameters on left, Tabs on right
@@ -2301,6 +2427,7 @@ def _(
         N_samples,
         aleatoric,
         aleatoric_gp,
+        basis_type_dropdown,
         function_dropdown,
         gp_lengthscale_slider,
         gp_support_radius_slider,
@@ -2509,10 +2636,21 @@ def _(mo):
     get_filter_max, set_filter_max = mo.state(5.0)
     get_filter_invert, set_filter_invert = mo.state(False)
     get_function_type, set_function_type = mo.state('sin')
+    get_custom_function_code, set_custom_function_code = mo.state(
+        "# Define y as a function of X (numpy array)\n"
+        "# Available: np, scipy, math, X\n"
+        "y = np.sin(X) + 0.1 * X**2"
+    )
     get_P, set_P = mo.state(10)
     get_basis_type, set_basis_type = mo.state('polynomial')
     get_basis_lengthscale, set_basis_lengthscale = mo.state(1.5)  # Default matches LJ ground truth offset
     get_basis_ls_enabled, set_basis_ls_enabled = mo.state(False)  # True for rbf/fourier
+    get_custom_basis_code, set_custom_basis_code = mo.state(
+        "# Define 'features' as 2D array (n_samples, n_features)\n"
+        "# Available: np, scipy, math, X (shape n,1), P (num params)\n"
+        "x = X[:, 0]\n"
+        "features = np.column_stack([x**i for i in range(P)])"
+    )
     get_calib_frac, set_calib_frac = mo.state(0.2)
     get_zeta, set_zeta = mo.state(0.05)
     get_percentile_clipping, set_percentile_clipping = mo.state(0)
@@ -2552,6 +2690,8 @@ def _(mo):
         get_basis_ls_enabled,
         get_basis_type,
         get_calib_frac,
+        get_custom_basis_code,
+        get_custom_function_code,
         get_filter_invert,
         get_filter_max,
         get_filter_min,
@@ -2582,6 +2722,8 @@ def _(mo):
         set_basis_ls_enabled,
         set_basis_type,
         set_calib_frac,
+        set_custom_basis_code,
+        set_custom_function_code,
         set_filter_invert,
         set_filter_max,
         set_filter_min,
@@ -2612,10 +2754,13 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     N_samples,
+    PolynomialFeatures,
     g,
     get_P,
     get_basis_lengthscale,
     get_basis_type,
+    get_custom_basis_code,
+    get_custom_function_code,
     get_filter_max,
     get_filter_min,
     get_function_type,
@@ -2624,6 +2769,10 @@ def _(
     gp_optimize_button,
     gp_support_radius_slider,
     gp_use_basis_mean,
+    make_custom_features,
+    make_fourier_features,
+    make_lj_features,
+    make_rbf_features,
     np,
     optimize_gp_hyperparameters,
     seed,
@@ -2642,7 +2791,9 @@ def _(
         _x_train = np.append(np.random.uniform(-10, 10, size=N_samples.value), np.linspace(-10, 10, 2))
         _x_train = _x_train[(_x_train < get_filter_min()) | (_x_train > get_filter_max())]
         _x_train = np.sort(_x_train)
-        _y_train = g(_x_train, noise_variance=sigma.value**2, function_type=get_function_type())
+        _func_type = get_function_type()
+        _custom_code = get_custom_function_code() if _func_type == 'custom' else None
+        _y_train = g(_x_train, noise_variance=sigma.value**2, function_type=_func_type, custom_code=_custom_code)
 
         # Set initial parameters - read from sliders, NOT state getters (avoids circular dependency)
         initial_params = {
@@ -2660,50 +2811,25 @@ def _(
         # Use default initial value for mean regularization (will be optimized)
         _mean_reg = 0.1
 
-        # Create basis features if using basis mean
+        # Create basis features if using basis mean (use shared make_*_features functions)
         _Phi_train = None
         if _use_basis_mean:
+            _X_train = _x_train.reshape(-1, 1)  # Functions expect 2D array
             _x_min, _x_max = _x_train.min(), _x_train.max()
             _P = get_P()
             _basis_type = get_basis_type()
 
             if _basis_type == 'polynomial':
-                from sklearn.preprocessing import PolynomialFeatures as PF
-                _poly = PF(degree=_P-1, include_bias=True)
-                _Phi_train = _poly.fit_transform(_x_train.reshape(-1, 1))
+                _poly = PolynomialFeatures(degree=_P-1, include_bias=True)
+                _Phi_train = _poly.fit_transform(_X_train)
             elif _basis_type == 'rbf':
-                _centers = np.linspace(_x_min, _x_max, _P)
-                _sigma_rbf = get_basis_lengthscale()
-                _Phi_train = np.column_stack([
-                    np.exp(-((_x_train - c)**2) / (2 * _sigma_rbf**2)) for c in _centers
-                ])
+                _Phi_train, _, _ = make_rbf_features(_X_train, _P, _x_min, _x_max, get_basis_lengthscale())
             elif _basis_type == 'fourier':
-                _L = get_basis_lengthscale()
-                _features = [np.ones(len(_x_train))]
-                _freq = 1
-                while len(_features) < _P:
-                    _features.append(np.sin(_freq * np.pi * _x_train / _L))
-                    if len(_features) < _P:
-                        _features.append(np.cos(_freq * np.pi * _x_train / _L))
-                    _freq += 1
-                _Phi_train = np.column_stack(_features[:_P])
+                _Phi_train, _ = make_fourier_features(_X_train, _P, _x_min, _x_max, get_basis_lengthscale())
             elif _basis_type == 'lj':
-                _offset = 1.5  # Hard-coded to match LJ ground truth
-                _r = _x_train / 5.0 + _offset
-                _r = np.maximum(_r, 0.1)
-                _features = []
-                # Order: constant, 1/r^12, 1/r^6, then inverse powers (matches make_lj_features)
-                if _P >= 1:
-                    _features.append(np.ones(len(_x_train)))  # Constant
-                if _P >= 2:
-                    _features.append(1.0 / _r**12)  # Repulsive
-                if _P >= 3:
-                    _features.append(1.0 / _r**6)   # Attractive
-                _power = 1
-                while len(_features) < _P:
-                    _features.append(1.0 / _r**_power)
-                    _power += 1
-                _Phi_train = np.column_stack(_features[:_P])
+                _Phi_train, _ = make_lj_features(_X_train, _P, _x_min, _x_max)
+            elif _basis_type == 'custom':
+                _Phi_train, _ = make_custom_features(_X_train, _P, get_custom_basis_code())
 
         # Optimize
         opt_lengthscale = None  # Initialize variables used in output formatting
