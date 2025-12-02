@@ -180,70 +180,35 @@ def _(BayesianRidge, np):
             return y_pred, np.sqrt(y_var)
 
         def log_marginal_likelihood(self):
-            """
-            Compute log marginal likelihood for the fitted Bayesian Ridge model
-
-            Uses the evidence lower bound from the fitted model
-            """
+            """Compute log marginal likelihood for the fitted Bayesian Ridge model"""
             if not hasattr(self, 'coef_'):
                 raise ValueError("Model must be fitted first")
-
-            # BayesianRidge stores the negative log marginal likelihood in scores_
-            # Return the final score (which is already log marginal likelihood)
             if hasattr(self, 'scores_') and len(self.scores_) > 0:
                 return self.scores_[-1]
             else:
                 return 0.0
 
         def loo_log_likelihood(self, X, y, aleatoric=False):
-            """
-            Compute Leave-One-Out cross-validation log likelihood (per point average).
-
-            Uses efficient closed-form formula without refitting.
-            LOO residual: e_i / (1 - h_ii)
-            LOO variance: σ²_pred_i / (1 - h_ii)
-
-            Parameters:
-            -----------
-            X : array (n, p) - design matrix (same as used for fitting)
-            y : array (n,) - target values
-            aleatoric : bool - include aleatoric noise in variance
-
-            Returns:
-            --------
-            float - average LOO log likelihood per point
-            """
+            """Compute Leave-One-Out cross-validation log likelihood (per point average)."""
             if not hasattr(self, 'coef_'):
                 raise ValueError("Model must be fitted first")
 
             n = len(y)
             y_pred = X @ self.coef_
-
-            # Predictive variance at each training point (epistemic only)
-            # Σ_pred = X @ Σ_post @ X.T, we need diagonal
             pred_var = np.sum((X @ self.sigma_) * X, axis=1)
-
-            # Add aleatoric noise variance
             noise_var = 1.0 / self.alpha_
             if aleatoric:
                 pred_var = pred_var + noise_var
 
-            # Leverage (hat matrix diagonal): h_ii = x_i @ Σ_post @ x_i.T * alpha
-            # This represents the influence of each point on its own prediction
             h = np.sum((X @ self.sigma_) * X, axis=1) * self.alpha_
-
-            # Clamp h to avoid division by zero (should be < 1 for valid models)
             h = np.clip(h, 0, 0.999)
 
-            # LOO residuals and variances
             residuals = y - y_pred
             loo_residuals = residuals / (1 - h)
             loo_var = (pred_var + noise_var) / (1 - h)
 
-            # Gaussian log likelihood
             loo_var = np.maximum(loo_var, 1e-10)
             log_lik = -0.5 * (np.log(2 * np.pi * loo_var) + loo_residuals**2 / loo_var)
-
             return np.mean(log_lik)
 
     class ConformalPrediction(MyBayesianRidge):
@@ -268,6 +233,8 @@ def _(BayesianRidge, np):
                 y_std = y_std * self.qhat
             return y_pred, y_std
     return ConformalPrediction, MyBayesianRidge
+
+
 
 
 @app.cell
@@ -2437,67 +2404,11 @@ def _(
 
 
 @app.cell
-def _(
-    bayes_log_ml,
-    bayesian,
-    conformal,
-    gp_log_ml,
-    gp_optimize_button,
-    gp_regression,
-    gp_sparsity,
-    metrics_dict,
-    mo,
-    n,
-    opt_message,
-    qhat,
-):
-    # Display computed outputs below the dashboard (only values not in sliders)
-    output_items = []
-
-    if bayesian.value and bayes_log_ml != 0.0:
-        output_items.append(f"Bayesian log ML: {bayes_log_ml:.1f}")
-
-    if conformal.value:
-        output_items.append(f"Calibration size (n): {n}")
-        output_items.append(f"Quantile (q̂): {qhat:.2f}")
-
-    if gp_regression.value:
-        # Add optimized hyperparameters if available
-        if gp_optimize_button.value and opt_message is not None and isinstance(opt_message, dict):
-            if 'error' in opt_message:
-                output_items.append(f"Opt error: {opt_message['error']}")
-            else:
-                # Show optimized log ML if available, otherwise current log ML
-                log_ml_value = opt_message.get('log_ml', gp_log_ml)
-                output_items.append(f"GP log ML: {log_ml_value:.1f}")
-
-                if opt_message.get('lengthscale') is not None:
-                    output_items.append(f"Opt lengthscale: {opt_message['lengthscale']:.3f}")
-                if opt_message.get('support_radius') is not None:
-                    output_items.append(f"Opt support: {opt_message['support_radius']:.3f}")
-                if opt_message.get('noise') is not None:
-                    output_items.append(f"Opt noise: {opt_message['noise']:.4f}")
-                if opt_message.get('mean_reg') is not None:
-                    output_items.append(f"Opt mean reg: {opt_message['mean_reg']:.4f}")
-        else:
-            # Show current log ML when not optimized
-            output_items.append(f"GP log ML: {gp_log_ml:.1f}")
-
-        output_items.append(f"Sparsity: {gp_sparsity:.1f}%")
-
-    # Display outputs
-    output_html = ""
-    if output_items:
-        outputs_text = " | ".join(output_items)
-        output_html = f'''
-        <div style="background-color: #e8f4f8; padding: 8px 15px; border-radius: 5px; margin: 0 auto 10px auto; max-width: 90%; text-align: center; font-size: 14px;">
-            <b>Outputs:</b> {outputs_text}
-        </div>
-        '''
-
-    # Display metrics table
-    metrics_html = ""
-    if metrics_dict:
+def _(metrics_dict, mo):
+    # Generate and display metrics table in an accordion
+    if not metrics_dict:
+        mo.accordion({"Performance Metrics": mo.md("*No metrics available. Enable a regression method.*")})
+    else:
         # Compute best/worst for each metric (for coloring)
         # Higher is better: coverage, log_likelihood, loo_log_lik
         # Lower is better: mse, crps, fit_time
@@ -2554,42 +2465,97 @@ def _(
 
             rows.append(f'''
             <tr>
-                <td style="text-align: left; padding: 5px 10px;"><b>{method_name}</b></td>
-                <td style="text-align: center; padding: 5px 10px; color: {cov_tc_color};">{cov_tc:.1f}%</td>
-                <td style="text-align: center; padding: 5px 10px; color: {cov_all_color};">{cov_all:.1f}%</td>
-                <td style="text-align: center; padding: 5px 10px; color: {mse_color};">{mse:.4f}</td>
-                <td style="text-align: center; padding: 5px 10px; color: {log_lik_color};">{log_lik_str}</td>
-                <td style="text-align: center; padding: 5px 10px; color: {loo_color};">{loo_str}</td>
-                <td style="text-align: center; padding: 5px 10px; color: {crps_color};">{crps:.4f}</td>
-                <td style="text-align: center; padding: 5px 10px; color: {time_color};">{m_fit_time*1000:.1f} ms</td>
+                <td style="text-align: left; padding: 3px 6px;"><b>{method_name}</b></td>
+                <td style="text-align: center; padding: 3px 6px; color: {cov_tc_color};">{cov_tc:.1f}%</td>
+                <td style="text-align: center; padding: 3px 6px; color: {cov_all_color};">{cov_all:.1f}%</td>
+                <td style="text-align: center; padding: 3px 6px; color: {mse_color};">{mse:.4f}</td>
+                <td style="text-align: center; padding: 3px 6px; color: {log_lik_color};">{log_lik_str}</td>
+                <td style="text-align: center; padding: 3px 6px; color: {loo_color};">{loo_str}</td>
+                <td style="text-align: center; padding: 3px 6px; color: {crps_color};">{crps:.4f}</td>
+                <td style="text-align: center; padding: 3px 6px; color: {time_color};">{m_fit_time*1000:.1f}ms</td>
             </tr>
             ''')
 
-        metrics_html = f'''
-        <div style="background-color: #f8f9fa; padding: 10px 15px; border-radius: 5px; margin: 0 auto 10px auto; max-width: 90%;">
-            <div style="text-align: center; font-size: 14px; margin-bottom: 8px;"><b>Performance Metrics</b></div>
-            <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-                <thead>
-                    <tr style="border-bottom: 2px solid #dee2e6;">
-                        <th style="text-align: left; padding: 5px 10px;">Method</th>
-                        <th style="text-align: center; padding: 5px 10px;">Coverage (train+calib)</th>
-                        <th style="text-align: center; padding: 5px 10px;">Coverage (all)</th>
-                        <th style="text-align: center; padding: 5px 10px;">MSE</th>
-                        <th style="text-align: center; padding: 5px 10px;">Log Lik</th>
-                        <th style="text-align: center; padding: 5px 10px;">LOO</th>
-                        <th style="text-align: center; padding: 5px 10px;">CRPS</th>
-                        <th style="text-align: center; padding: 5px 10px;">Fit Time</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {''.join(rows)}
-                </tbody>
-            </table>
+        metrics_table = mo.Html(f'''
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+            <thead>
+                <tr style="border-bottom: 2px solid #dee2e6;">
+                    <th style="text-align: left; padding: 5px 10px;">Method</th>
+                    <th style="text-align: center; padding: 5px 10px;">Cov (t+c)</th>
+                    <th style="text-align: center; padding: 5px 10px;">Cov (all)</th>
+                    <th style="text-align: center; padding: 5px 10px;">MSE</th>
+                    <th style="text-align: center; padding: 5px 10px;">Log Lik</th>
+                    <th style="text-align: center; padding: 5px 10px;">LOO</th>
+                    <th style="text-align: center; padding: 5px 10px;">CRPS</th>
+                    <th style="text-align: center; padding: 5px 10px;">Fit Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(rows)}
+            </tbody>
+        </table>
+        ''')
+        mo.accordion({"Performance Metrics": metrics_table})
+    return
+
+
+@app.cell
+def _(
+    bayes_log_ml,
+    bayesian,
+    conformal,
+    gp_log_ml,
+    gp_optimize_button,
+    gp_regression,
+    gp_sparsity,
+    mo,
+    n,
+    opt_message,
+    qhat,
+):
+    # Display computed outputs below the dashboard (only values not in sliders)
+    output_items = []
+
+    if bayesian.value and bayes_log_ml != 0.0:
+        output_items.append(f"Bayesian log ML: {bayes_log_ml:.1f}")
+
+    if conformal.value:
+        output_items.append(f"Calibration size (n): {n}")
+        output_items.append(f"Quantile (q̂): {qhat:.2f}")
+
+    if gp_regression.value:
+        # Add optimized hyperparameters if available
+        if gp_optimize_button.value and opt_message is not None and isinstance(opt_message, dict):
+            if 'error' in opt_message:
+                output_items.append(f"Opt error: {opt_message['error']}")
+            else:
+                # Show optimized log ML if available, otherwise current log ML
+                log_ml_value = opt_message.get('log_ml', gp_log_ml)
+                output_items.append(f"GP log ML: {log_ml_value:.1f}")
+
+                if opt_message.get('lengthscale') is not None:
+                    output_items.append(f"Opt lengthscale: {opt_message['lengthscale']:.3f}")
+                if opt_message.get('support_radius') is not None:
+                    output_items.append(f"Opt support: {opt_message['support_radius']:.3f}")
+                if opt_message.get('noise') is not None:
+                    output_items.append(f"Opt noise: {opt_message['noise']:.4f}")
+                if opt_message.get('mean_reg') is not None:
+                    output_items.append(f"Opt mean reg: {opt_message['mean_reg']:.4f}")
+        else:
+            # Show current log ML when not optimized
+            output_items.append(f"GP log ML: {gp_log_ml:.1f}")
+
+        output_items.append(f"Sparsity: {gp_sparsity:.1f}%")
+
+    # Display outputs
+    if output_items:
+        outputs_text = " | ".join(output_items)
+        output_html = f'''
+        <div style="background-color: #e8f4f8; padding: 8px 15px; border-radius: 5px; margin: 0 auto 10px auto; max-width: 90%; text-align: center; font-size: 14px;">
+            <b>Outputs:</b> {outputs_text}
         </div>
         '''
-
-    result = mo.Html(output_html + metrics_html)
-    result
+        mo.Html(output_html)
     return
 
 
