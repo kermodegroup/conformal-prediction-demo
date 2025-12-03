@@ -24,6 +24,7 @@ def optimize_gp_hyperparameters(
     Phi_train=None,
     joint_inference=False,
     mean_regularization_strength=0.1,
+    custom_code=None,
 ):
     """
     Optimize GP hyperparameters by maximizing marginal likelihood.
@@ -35,7 +36,7 @@ def optimize_gp_hyperparameters(
     y_train : array (n_train,)
         Training targets
     kernel_type : str
-        Kernel type ('rbf', 'matern', 'bump', 'polynomial')
+        Kernel type ('rbf', 'matern', 'bump', 'polynomial', 'custom')
     initial_params : dict
         Initial hyperparameter values
     max_iter : int
@@ -48,6 +49,8 @@ def optimize_gp_hyperparameters(
         If True optimize mean regularization jointly
     mean_regularization_strength : float
         Initial mean regularization strength
+    custom_code : str or None
+        Custom kernel code (required if kernel_type='custom')
 
     Returns
     -------
@@ -96,6 +99,18 @@ def optimize_gp_hyperparameters(
             mean_regularization_strength,
         )
 
+    elif kernel_type == "custom":
+        if custom_code is None:
+            raise ValueError("custom_code required for custom kernel")
+        pack_params, unpack_params, x0, bounds = _setup_custom_params(
+            initial_params,
+            use_basis_mean,
+            joint_inference,
+            Phi_train,
+            mean_regularization_strength,
+            custom_code,
+        )
+
     else:
         raise ValueError(f"Unknown kernel type: {kernel_type}")
 
@@ -121,14 +136,48 @@ def optimize_gp_hyperparameters(
 
         return -log_ml
 
-    # Optimize
-    result = minimize(
-        neg_log_marginal_likelihood,
-        x0,
-        bounds=bounds,
-        method="L-BFGS-B",
-        options={"maxiter": max_iter},
-    )
+    # Optimize - use L-BFGS-B with Nelder-Mead fallback for custom kernels
+    if kernel_type == "custom":
+        # Custom kernels may have non-smooth objectives; try L-BFGS-B first
+        try:
+            result = minimize(
+                neg_log_marginal_likelihood,
+                x0,
+                bounds=bounds,
+                method="L-BFGS-B",
+                options={"maxiter": max_iter},
+            )
+            if not result.success or not np.isfinite(result.fun):
+                raise RuntimeError("L-BFGS-B failed")
+        except Exception:
+            # Fallback to derivative-free Nelder-Mead (no native bounds)
+            def bounded_objective(x):
+                x_clipped = np.clip(
+                    x,
+                    [b[0] for b in bounds],
+                    [b[1] for b in bounds]
+                )
+                return neg_log_marginal_likelihood(x_clipped)
+            result = minimize(
+                bounded_objective,
+                x0,
+                method="Nelder-Mead",
+                options={"maxiter": max_iter * 10, "xatol": 1e-4, "fatol": 1e-4},
+            )
+            # Clip result to bounds
+            result.x = np.clip(
+                result.x,
+                [b[0] for b in bounds],
+                [b[1] for b in bounds]
+            )
+    else:
+        result = minimize(
+            neg_log_marginal_likelihood,
+            x0,
+            bounds=bounds,
+            method="L-BFGS-B",
+            options={"maxiter": max_iter},
+        )
 
     optimized_params = unpack_params(result.x)
     log_ml = -result.fun
@@ -143,38 +192,55 @@ def _setup_rbf_params(
     Phi_train,
     mean_regularization_strength,
 ):
-    """Set up parameter packing for RBF kernel."""
+    """Set up parameter packing for RBF kernel (includes signal_variance)."""
     if use_basis_mean and joint_inference and Phi_train is not None:
 
-        def pack_params(lengthscale, noise, mean_reg):
-            return np.array([np.log(lengthscale), np.log(noise), np.log(mean_reg)])
+        def pack_params(lengthscale, signal_variance, noise, mean_reg):
+            return np.array([
+                np.log(lengthscale),
+                np.log(signal_variance),
+                np.log(noise),
+                np.log(mean_reg)
+            ])
 
         def unpack_params(x):
             return {
                 "lengthscale": np.exp(x[0]),
-                "noise": np.exp(x[1]),
-                "mean_regularization": np.exp(x[2]),
+                "signal_variance": np.exp(x[1]),
+                "noise": np.exp(x[2]),
+                "mean_regularization": np.exp(x[3]),
             }
 
         x0 = pack_params(
             initial_params.get("lengthscale", 1.0),
+            initial_params.get("signal_variance", 1.0),
             initial_params.get("noise", 0.1),
             mean_regularization_strength,
         )
-        bounds = [(-2, 2), (-6, 0), (-6, 1)]
+        # lengthscale: [0.14, 7.4], signal_variance: [0.14, 7.4], noise: [0.002, 1.0]
+        bounds = [(-2, 2), (-2, 2), (-6, 0), (-6, 1)]
     else:
 
-        def pack_params(lengthscale, noise):
-            return np.array([np.log(lengthscale), np.log(noise)])
+        def pack_params(lengthscale, signal_variance, noise):
+            return np.array([
+                np.log(lengthscale),
+                np.log(signal_variance),
+                np.log(noise)
+            ])
 
         def unpack_params(x):
-            return {"lengthscale": np.exp(x[0]), "noise": np.exp(x[1])}
+            return {
+                "lengthscale": np.exp(x[0]),
+                "signal_variance": np.exp(x[1]),
+                "noise": np.exp(x[2])
+            }
 
         x0 = pack_params(
             initial_params.get("lengthscale", 1.0),
+            initial_params.get("signal_variance", 1.0),
             initial_params.get("noise", 0.1),
         )
-        bounds = [(-2, 2), (-6, 0)]
+        bounds = [(-2, 2), (-2, 2), (-6, 0)]
 
     return pack_params, unpack_params, x0, bounds
 
@@ -203,54 +269,60 @@ def _setup_bump_params(
     Phi_train,
     mean_regularization_strength,
 ):
-    """Set up parameter packing for bump kernel."""
+    """Set up parameter packing for bump kernel (includes signal_variance)."""
     if use_basis_mean and joint_inference and Phi_train is not None:
 
-        def pack_params(lengthscale, support_radius, noise, mean_reg):
-            return np.array(
-                [
-                    np.log(lengthscale),
-                    np.log(support_radius),
-                    np.log(noise),
-                    np.log(mean_reg),
-                ]
-            )
+        def pack_params(lengthscale, signal_variance, support_radius, noise, mean_reg):
+            return np.array([
+                np.log(lengthscale),
+                np.log(signal_variance),
+                np.log(support_radius),
+                np.log(noise),
+                np.log(mean_reg),
+            ])
 
         def unpack_params(x):
             return {
                 "lengthscale": np.exp(x[0]),
-                "support_radius": np.exp(x[1]),
-                "noise": np.exp(x[2]),
-                "mean_regularization": np.exp(x[3]),
+                "signal_variance": np.exp(x[1]),
+                "support_radius": np.exp(x[2]),
+                "noise": np.exp(x[3]),
+                "mean_regularization": np.exp(x[4]),
             }
 
         x0 = pack_params(
             initial_params.get("lengthscale", 1.0),
+            initial_params.get("signal_variance", 1.0),
             initial_params.get("support_radius", 2.0),
             initial_params.get("noise", 0.1),
             mean_regularization_strength,
         )
-        bounds = [(-2, 2), (-1, 2), (-6, 0), (-6, 1)]
+        bounds = [(-2, 2), (-2, 2), (-1, 2), (-6, 0), (-6, 1)]
     else:
 
-        def pack_params(lengthscale, support_radius, noise):
-            return np.array(
-                [np.log(lengthscale), np.log(support_radius), np.log(noise)]
-            )
+        def pack_params(lengthscale, signal_variance, support_radius, noise):
+            return np.array([
+                np.log(lengthscale),
+                np.log(signal_variance),
+                np.log(support_radius),
+                np.log(noise)
+            ])
 
         def unpack_params(x):
             return {
                 "lengthscale": np.exp(x[0]),
-                "support_radius": np.exp(x[1]),
-                "noise": np.exp(x[2]),
+                "signal_variance": np.exp(x[1]),
+                "support_radius": np.exp(x[2]),
+                "noise": np.exp(x[3]),
             }
 
         x0 = pack_params(
             initial_params.get("lengthscale", 1.0),
+            initial_params.get("signal_variance", 1.0),
             initial_params.get("support_radius", 2.0),
             initial_params.get("noise", 0.1),
         )
-        bounds = [(-2, 2), (-1, 2), (-6, 0)]
+        bounds = [(-2, 2), (-2, 2), (-1, 2), (-6, 0)]
 
     return pack_params, unpack_params, x0, bounds
 
@@ -297,5 +369,67 @@ def _setup_polynomial_params(
             initial_params.get("noise", 0.1),
         )
         bounds = [(-3, 1), (-6, 0)]
+
+    return pack_params, unpack_params, x0, bounds
+
+
+def _setup_custom_params(
+    initial_params,
+    use_basis_mean,
+    joint_inference,
+    Phi_train,
+    mean_regularization_strength,
+    custom_code,
+):
+    """Set up parameter packing for custom kernel."""
+    if use_basis_mean and joint_inference and Phi_train is not None:
+
+        def pack_params(lengthscale, signal_variance, noise, mean_reg):
+            return np.array([
+                np.log(lengthscale),
+                np.log(signal_variance),
+                np.log(noise),
+                np.log(mean_reg)
+            ])
+
+        def unpack_params(x):
+            return {
+                "lengthscale": np.exp(x[0]),
+                "signal_variance": np.exp(x[1]),
+                "noise": np.exp(x[2]),
+                "mean_regularization": np.exp(x[3]),
+                "custom_code": custom_code,
+            }
+
+        x0 = pack_params(
+            initial_params.get("lengthscale", 1.0),
+            initial_params.get("signal_variance", 1.0),
+            initial_params.get("noise", 0.1),
+            mean_regularization_strength,
+        )
+        bounds = [(-2, 2), (-2, 2), (-6, 0), (-6, 1)]
+    else:
+
+        def pack_params(lengthscale, signal_variance, noise):
+            return np.array([
+                np.log(lengthscale),
+                np.log(signal_variance),
+                np.log(noise)
+            ])
+
+        def unpack_params(x):
+            return {
+                "lengthscale": np.exp(x[0]),
+                "signal_variance": np.exp(x[1]),
+                "noise": np.exp(x[2]),
+                "custom_code": custom_code,
+            }
+
+        x0 = pack_params(
+            initial_params.get("lengthscale", 1.0),
+            initial_params.get("signal_variance", 1.0),
+            initial_params.get("noise", 0.1),
+        )
+        bounds = [(-2, 2), (-2, 2), (-6, 0)]
 
     return pack_params, unpack_params, x0, bounds

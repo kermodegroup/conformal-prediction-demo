@@ -8,7 +8,7 @@ import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
 
-def rbf_kernel(X1, X2, lengthscale):
+def rbf_kernel(X1, X2, lengthscale, signal_variance=1.0):
     """
     RBF/squared exponential kernel.
 
@@ -20,6 +20,8 @@ def rbf_kernel(X1, X2, lengthscale):
         Second set of points
     lengthscale : float
         Kernel lengthscale
+    signal_variance : float
+        Signal variance (amplitude squared)
 
     Returns
     -------
@@ -27,11 +29,11 @@ def rbf_kernel(X1, X2, lengthscale):
         Kernel matrix
     """
     dists_sq = (X1[:, None] - X2[None, :]) ** 2
-    K = np.exp(-0.5 * dists_sq / lengthscale**2)
+    K = signal_variance * np.exp(-0.5 * dists_sq / lengthscale**2)
     return K
 
 
-def matern_kernel(X1, X2, lengthscale, nu=1.5):
+def matern_kernel(X1, X2, lengthscale, signal_variance=1.0, nu=1.5):
     """
     Matérn kernel with nu=1.5 (Matérn-3/2).
 
@@ -43,6 +45,8 @@ def matern_kernel(X1, X2, lengthscale, nu=1.5):
         Second set of points
     lengthscale : float
         Kernel lengthscale
+    signal_variance : float
+        Signal variance (amplitude squared)
     nu : float
         Smoothness parameter (only 1.5 implemented)
 
@@ -54,11 +58,11 @@ def matern_kernel(X1, X2, lengthscale, nu=1.5):
     dists = np.abs(X1[:, None] - X2[None, :])
     r = dists / lengthscale
     sqrt3_r = np.sqrt(3.0) * r
-    K = (1.0 + sqrt3_r) * np.exp(-sqrt3_r)
+    K = signal_variance * (1.0 + sqrt3_r) * np.exp(-sqrt3_r)
     return K
 
 
-def bump_kernel(X1, X2, lengthscale, support_radius):
+def bump_kernel(X1, X2, lengthscale, support_radius, signal_variance=1.0):
     """
     Wendland C2 compactly supported kernel.
 
@@ -72,6 +76,8 @@ def bump_kernel(X1, X2, lengthscale, support_radius):
         Kernel lengthscale
     support_radius : float
         Compact support radius
+    signal_variance : float
+        Signal variance (amplitude squared)
 
     Returns
     -------
@@ -81,7 +87,7 @@ def bump_kernel(X1, X2, lengthscale, support_radius):
     dists = np.abs(X1[:, None] - X2[None, :])
     r = dists / (lengthscale * support_radius)
     r_clipped = np.clip(r, 0.0, 1.0)
-    K = np.where(r < 1.0, (1.0 - r_clipped) ** 4 * (4.0 * r_clipped + 1.0), 0.0)
+    K = signal_variance * np.where(r < 1.0, (1.0 - r_clipped) ** 4 * (4.0 * r_clipped + 1.0), 0.0)
     return K
 
 
@@ -112,6 +118,66 @@ def polynomial_kernel(X1, X2, degree, sigma):
     return K
 
 
+def custom_kernel(X1, X2, lengthscale, signal_variance, custom_code):
+    """
+    Execute user-defined kernel code.
+
+    Parameters
+    ----------
+    X1, X2 : array (n1,), (n2,)
+        Input points
+    lengthscale : float
+        Kernel lengthscale parameter
+    signal_variance : float
+        Kernel signal variance (amplitude squared)
+    custom_code : str
+        User code that defines K matrix
+
+    Returns
+    -------
+    K : array (n1, n2)
+        Kernel matrix, or None if execution failed
+    error : str or None
+        Error message if execution failed
+    """
+    import math
+    import scipy
+
+    safe_builtins = {
+        'range': range, 'len': len, 'sum': sum, 'min': min, 'max': max,
+        'abs': abs, 'round': round, 'int': int, 'float': float,
+        'list': list, 'tuple': tuple, 'zip': zip, 'enumerate': enumerate,
+        'True': True, 'False': False, 'None': None, 'print': print,
+    }
+
+    try:
+        namespace = {
+            'np': np, 'scipy': scipy, 'math': math,
+            'X1': np.atleast_1d(X1), 'X2': np.atleast_1d(X2),
+            'lengthscale': lengthscale, 'signal_variance': signal_variance
+        }
+        exec(custom_code, {"__builtins__": safe_builtins}, namespace)
+
+        if 'K' not in namespace:
+            return None, "Code must define 'K'"
+
+        K = np.atleast_2d(np.asarray(namespace['K'], dtype=float))
+
+        # Validate shape
+        expected_shape = (len(np.atleast_1d(X1)), len(np.atleast_1d(X2)))
+        if K.shape != expected_shape:
+            return None, f"K shape {K.shape} doesn't match expected {expected_shape}"
+
+        # Check for NaN/Inf
+        if np.any(np.isnan(K)) or np.any(np.isinf(K)):
+            return None, "Kernel matrix contains NaN or Inf values"
+
+        return K, None
+
+    except Exception as e:
+        return None, str(e)
+
+
 def compute_kernel_matrix(X1, X2, kernel_type, params):
     """
     Compute kernel matrix given type and parameters.
@@ -132,14 +198,25 @@ def compute_kernel_matrix(X1, X2, kernel_type, params):
     K : array (n1, n2)
         Kernel matrix
     """
-    if kernel_type == "bump":
-        return bump_kernel(X1, X2, params["lengthscale"], params["support_radius"])
+    if kernel_type == "custom":
+        K, error = custom_kernel(
+            X1, X2,
+            params.get("lengthscale", 1.0),
+            params.get("signal_variance", 1.0),
+            params.get("custom_code", "")
+        )
+        if error:
+            raise ValueError(f"Custom kernel error: {error}")
+        return K
+    elif kernel_type == "bump":
+        return bump_kernel(X1, X2, params["lengthscale"], params["support_radius"],
+                          params.get("signal_variance", 1.0))
     elif kernel_type == "polynomial":
         return polynomial_kernel(X1, X2, params["degree"], params["sigma"])
     elif kernel_type == "rbf":
-        return rbf_kernel(X1, X2, params["lengthscale"])
+        return rbf_kernel(X1, X2, params["lengthscale"], params.get("signal_variance", 1.0))
     elif kernel_type == "matern":
-        return matern_kernel(X1, X2, params["lengthscale"])
+        return matern_kernel(X1, X2, params["lengthscale"], params.get("signal_variance", 1.0))
     else:
         raise ValueError(f"Unknown kernel type: {kernel_type}")
 
@@ -315,6 +392,83 @@ def gp_predict(X_train, y_train, X_test, K_train, K_test_train, K_test, noise):
     y_std = np.sqrt(y_var)
 
     return y_mean, y_std
+
+
+def gp_sample_posterior(X_train, y_train, X_test, K_train, K_test_train, K_test, noise, n_samples=10):
+    """
+    Draw samples from the GP posterior predictive distribution.
+
+    Parameters
+    ----------
+    X_train : array (n_train,)
+        Training inputs
+    y_train : array (n_train,)
+        Training targets
+    X_test : array (n_test,)
+        Test inputs
+    K_train : array (n_train, n_train)
+        Kernel on training data
+    K_test_train : array (n_test, n_train)
+        Cross kernel
+    K_test : array (n_test, n_test)
+        Kernel on test data
+    noise : float
+        Observation noise variance
+    n_samples : int
+        Number of posterior samples to draw
+
+    Returns
+    -------
+    samples : array (n_test, n_samples)
+        Posterior predictive samples
+    """
+    n_train = len(X_train)
+    n_test = len(X_test)
+
+    # Add noise to diagonal
+    K_noisy = K_train + noise * np.eye(n_train)
+
+    # Cholesky decomposition of training kernel
+    try:
+        L_train, lower = cho_factor(K_noisy, lower=True)
+    except np.linalg.LinAlgError:
+        K_noisy += 1e-3 * np.eye(n_train)
+        L_train, lower = cho_factor(K_noisy, lower=True)
+
+    # Solve for alpha = K^{-1} y
+    alpha = cho_solve((L_train, lower), y_train)
+
+    # Predictive mean
+    y_mean = K_test_train @ alpha
+
+    # Posterior covariance: K_** - K_*n @ K_nn^{-1} @ K_n*
+    v = cho_solve((L_train, lower), K_test_train.T)
+    K_post = K_test - K_test_train @ v
+
+    # Add jitter for numerical stability
+    jitter = 1e-6
+    K_post += jitter * np.eye(n_test)
+
+    # Ensure symmetry
+    K_post = 0.5 * (K_post + K_post.T)
+
+    # Cholesky decompose posterior covariance
+    try:
+        L_post = np.linalg.cholesky(K_post)
+    except np.linalg.LinAlgError:
+        # If Cholesky fails, add more jitter
+        K_post += 1e-4 * np.eye(n_test)
+        try:
+            L_post = np.linalg.cholesky(K_post)
+        except np.linalg.LinAlgError:
+            # Fallback: return mean repeated n_samples times
+            return np.tile(y_mean[:, None], (1, n_samples))
+
+    # Sample: mean + L @ z where z ~ N(0, I)
+    z = np.random.randn(n_test, n_samples)
+    samples = y_mean[:, None] + L_post @ z
+
+    return samples
 
 
 def gp_loo_log_likelihood(y_train, K_train, noise):

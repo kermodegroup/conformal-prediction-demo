@@ -49,6 +49,35 @@ class MyBayesianRidge(BayesianRidge):
             y_var += 1.0 / self.alpha_
         return y_pred, np.sqrt(y_var)
 
+    def sample_posterior(self, X, n_samples=10):
+        """
+        Draw samples from the posterior predictive distribution.
+
+        Parameters
+        ----------
+        X : array (n_points, n_features)
+            Input features
+        n_samples : int
+            Number of posterior samples to draw
+
+        Returns
+        -------
+        samples : array (n_points, n_samples)
+            Posterior predictive samples
+        """
+        if not hasattr(self, "coef_"):
+            raise ValueError("Model must be fitted first")
+
+        # Sample coefficients from posterior N(coef_, sigma_)
+        coef_samples = np.random.multivariate_normal(
+            self.coef_, self.sigma_, size=n_samples
+        )
+        # Compute predictions for each sample: X @ coef^T for each coef sample
+        # coef_samples shape: (n_samples, n_features)
+        # X shape: (n_points, n_features)
+        # Result shape: (n_points, n_samples)
+        return X @ coef_samples.T
+
     def log_marginal_likelihood(self):
         """
         Get log marginal likelihood for the fitted model.

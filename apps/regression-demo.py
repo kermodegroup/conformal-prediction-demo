@@ -211,6 +211,13 @@ def _(BayesianRidge, np):
             log_lik = -0.5 * (np.log(2 * np.pi * loo_var) + loo_residuals**2 / loo_var)
             return np.mean(log_lik)
 
+        def sample_posterior(self, X, n_samples=10):
+            """Draw samples from the posterior predictive distribution."""
+            if not hasattr(self, 'coef_'):
+                raise ValueError("Model must be fitted first")
+            coef_samples = np.random.multivariate_normal(self.coef_, self.sigma_, size=n_samples)
+            return X @ coef_samples.T
+
     class ConformalPrediction(MyBayesianRidge):
         def get_scores(self, X, y, aleatoric=False):
             y_pred, y_std = self.predict(X, return_std=True, rescale=False, aleatoric=aleatoric)
@@ -516,12 +523,12 @@ def _(np):
 def _(cho_factor, cho_solve, np):
     # Pure numpy/scipy GP implementation for WebAssembly compatibility
 
-    def bump_kernel(X1, X2, lengthscale, support_radius):
+    def bump_kernel(X1, X2, lengthscale, support_radius, signal_variance=1.0):
         """Wendland C2 compactly supported kernel"""
         dists = np.abs(X1[:, None] - X2[None, :])
         r = dists / (lengthscale * support_radius)
         r_clipped = np.clip(r, 0.0, 1.0)
-        K = np.where(r < 1.0, (1.0 - r_clipped)**4 * (4.0 * r_clipped + 1.0), 0.0)
+        K = signal_variance * np.where(r < 1.0, (1.0 - r_clipped)**4 * (4.0 * r_clipped + 1.0), 0.0)
         return K
 
     def polynomial_kernel(X1, X2, degree, sigma):
@@ -532,30 +539,78 @@ def _(cho_factor, cho_solve, np):
         K = (sigma + x1_norm[:, None] * x2_norm[None, :])**degree
         return K
 
-    def rbf_kernel(X1, X2, lengthscale):
+    def rbf_kernel(X1, X2, lengthscale, signal_variance=1.0):
         """RBF/squared exponential kernel"""
         dists_sq = (X1[:, None] - X2[None, :])**2
-        K = np.exp(-0.5 * dists_sq / lengthscale**2)
+        K = signal_variance * np.exp(-0.5 * dists_sq / lengthscale**2)
         return K
 
-    def matern_kernel(X1, X2, lengthscale, nu=1.5):
+    def matern_kernel(X1, X2, lengthscale, signal_variance=1.0, nu=1.5):
         """Matérn kernel with nu=1.5 (Matérn-3/2)"""
         dists = np.abs(X1[:, None] - X2[None, :])
         r = dists / lengthscale
         sqrt3_r = np.sqrt(3.0) * r
-        K = (1.0 + sqrt3_r) * np.exp(-sqrt3_r)
+        K = signal_variance * (1.0 + sqrt3_r) * np.exp(-sqrt3_r)
         return K
+
+    def custom_kernel(X1, X2, lengthscale, signal_variance, custom_code):
+        """Execute user-defined kernel code."""
+        import math
+        import scipy
+
+        safe_builtins = {
+            'range': range, 'len': len, 'sum': sum, 'min': min, 'max': max,
+            'abs': abs, 'round': round, 'int': int, 'float': float,
+            'list': list, 'tuple': tuple, 'zip': zip, 'enumerate': enumerate,
+            'True': True, 'False': False, 'None': None, 'print': print,
+        }
+
+        try:
+            namespace = {
+                'np': np, 'scipy': scipy, 'math': math,
+                'X1': np.atleast_1d(X1), 'X2': np.atleast_1d(X2),
+                'lengthscale': lengthscale, 'signal_variance': signal_variance
+            }
+            exec(custom_code, {"__builtins__": safe_builtins}, namespace)
+
+            if 'K' not in namespace:
+                return None, "Code must define 'K'"
+
+            K = np.atleast_2d(np.asarray(namespace['K'], dtype=float))
+
+            expected_shape = (len(np.atleast_1d(X1)), len(np.atleast_1d(X2)))
+            if K.shape != expected_shape:
+                return None, f"K shape {K.shape} doesn't match expected {expected_shape}"
+
+            if np.any(np.isnan(K)) or np.any(np.isinf(K)):
+                return None, "Kernel matrix contains NaN or Inf values"
+
+            return K, None
+
+        except Exception as e:
+            return None, str(e)
 
     def compute_kernel_matrix(X1, X2, kernel_type, params):
         """Helper to compute kernel matrix given type and params"""
-        if kernel_type == 'bump':
-            return bump_kernel(X1, X2, params['lengthscale'], params['support_radius'])
+        if kernel_type == 'custom':
+            K, error = custom_kernel(
+                X1, X2,
+                params.get('lengthscale', 1.0),
+                params.get('signal_variance', 1.0),
+                params.get('custom_code', '')
+            )
+            if error:
+                raise ValueError(f"Custom kernel error: {error}")
+            return K
+        elif kernel_type == 'bump':
+            return bump_kernel(X1, X2, params['lengthscale'], params['support_radius'],
+                              params.get('signal_variance', 1.0))
         elif kernel_type == 'polynomial':
             return polynomial_kernel(X1, X2, params['degree'], params['sigma'])
         elif kernel_type == 'rbf':
-            return rbf_kernel(X1, X2, params['lengthscale'])
+            return rbf_kernel(X1, X2, params['lengthscale'], params.get('signal_variance', 1.0))
         elif kernel_type == 'matern':
-            return matern_kernel(X1, X2, params['lengthscale'])
+            return matern_kernel(X1, X2, params['lengthscale'], params.get('signal_variance', 1.0))
         else:
             raise ValueError(f"Unknown kernel type: {kernel_type}")
 
@@ -698,6 +753,38 @@ def _(cho_factor, cho_solve, np):
 
         return y_mean, y_std
 
+    def gp_sample_posterior(X_train, y_train, X_test, K_train, K_test_train, K_test, noise, n_samples=10):
+        """Draw samples from the GP posterior predictive distribution."""
+        n_train = len(X_train)
+        n_test = len(X_test)
+
+        K_noisy = K_train + noise * np.eye(n_train)
+        try:
+            L_train, lower = cho_factor(K_noisy, lower=True)
+        except np.linalg.LinAlgError:
+            K_noisy += 1e-3 * np.eye(n_train)
+            L_train, lower = cho_factor(K_noisy, lower=True)
+
+        alpha = cho_solve((L_train, lower), y_train)
+        y_mean = K_test_train @ alpha
+
+        v = cho_solve((L_train, lower), K_test_train.T)
+        K_post = K_test - K_test_train @ v
+        K_post += 1e-6 * np.eye(n_test)
+        K_post = 0.5 * (K_post + K_post.T)
+
+        try:
+            L_post = np.linalg.cholesky(K_post)
+        except np.linalg.LinAlgError:
+            K_post += 1e-4 * np.eye(n_test)
+            try:
+                L_post = np.linalg.cholesky(K_post)
+            except np.linalg.LinAlgError:
+                return np.tile(y_mean[:, None], (1, n_samples))
+
+        z = np.random.randn(n_test, n_samples)
+        return y_mean[:, None] + L_post @ z
+
     def gp_loo_log_likelihood(y_train, K_train, noise):
         """
         Compute Leave-One-Out cross-validation log likelihood for GP (per point average).
@@ -752,7 +839,7 @@ def _(cho_factor, cho_solve, np):
 
     def optimize_gp_hyperparameters(X_train, y_train, kernel_type, initial_params, max_iter=50,
                                      use_basis_mean=False, Phi_train=None, joint_inference=False,
-                                     mean_regularization_strength=0.1):
+                                     mean_regularization_strength=0.1, custom_code=None):
         """
         Optimize GP hyperparameters by maximizing marginal likelihood
 
@@ -767,6 +854,7 @@ def _(cho_factor, cho_solve, np):
         Phi_train : array (n_train, n_basis) or None - pre-computed basis features
         joint_inference : bool, if True optimize mean regularization jointly
         mean_regularization_strength : float, initial mean regularization strength
+        custom_code : str or None, custom kernel code (required if kernel_type='custom')
 
         Returns:
         --------
@@ -781,86 +869,94 @@ def _(cho_factor, cho_solve, np):
         # Define bounds and parameterization (work in log space for positive params)
         if kernel_type == 'rbf':
             if use_basis_mean and joint_inference and Phi_train is not None:
-                # Optimize: log_lengthscale, log_noise, log_mean_regularization
-                def pack_params(lengthscale, noise, mean_reg):
-                    return np.array([np.log(lengthscale), np.log(noise), np.log(mean_reg)])
-
-                def unpack_params(x):
-                    return {'lengthscale': np.exp(x[0]), 'noise': np.exp(x[1]),
-                           'mean_regularization': np.exp(x[2])}
-
-                x0 = pack_params(initial_params.get('lengthscale', 1.0),
-                               initial_params.get('noise', 0.1),
-                               mean_regularization_strength)
-                bounds = [(-2, 2), (-6, 0), (-6, 1)]  # mean_reg: [0.000001, 10]
-            else:
-                # Optimize: log_lengthscale, log_noise
-                def pack_params(lengthscale, noise):
-                    return np.array([np.log(lengthscale), np.log(noise)])
-
-                def unpack_params(x):
-                    return {'lengthscale': np.exp(x[0]), 'noise': np.exp(x[1])}
-
-                x0 = pack_params(initial_params.get('lengthscale', 1.0),
-                               initial_params.get('noise', 0.1))
-                bounds = [(-2, 2), (-6, 0)]
-
-        elif kernel_type == 'matern':
-            # Same hyperparameters as RBF: lengthscale and noise
-            if use_basis_mean and joint_inference and Phi_train is not None:
-                # Optimize: log_lengthscale, log_noise, log_mean_regularization
-                def pack_params(lengthscale, noise, mean_reg):
-                    return np.array([np.log(lengthscale), np.log(noise), np.log(mean_reg)])
-
-                def unpack_params(x):
-                    return {'lengthscale': np.exp(x[0]), 'noise': np.exp(x[1]),
-                           'mean_regularization': np.exp(x[2])}
-
-                x0 = pack_params(initial_params.get('lengthscale', 1.0),
-                               initial_params.get('noise', 0.1),
-                               mean_regularization_strength)
-                bounds = [(-2, 2), (-6, 0), (-6, 1)]  # mean_reg: [0.000001, 10]
-            else:
-                # Optimize: log_lengthscale, log_noise
-                def pack_params(lengthscale, noise):
-                    return np.array([np.log(lengthscale), np.log(noise)])
-
-                def unpack_params(x):
-                    return {'lengthscale': np.exp(x[0]), 'noise': np.exp(x[1])}
-
-                x0 = pack_params(initial_params.get('lengthscale', 1.0),
-                               initial_params.get('noise', 0.1))
-                bounds = [(-2, 2), (-6, 0)]
-
-        elif kernel_type == 'bump':
-            if use_basis_mean and joint_inference and Phi_train is not None:
-                # Optimize: log_lengthscale, log_support_radius, log_noise, log_mean_regularization
-                def pack_params(lengthscale, support_radius, noise, mean_reg):
-                    return np.array([np.log(lengthscale), np.log(support_radius),
+                # Optimize: log_lengthscale, log_signal_variance, log_noise, log_mean_regularization
+                def pack_params(lengthscale, signal_variance, noise, mean_reg):
+                    return np.array([np.log(lengthscale), np.log(signal_variance),
                                    np.log(noise), np.log(mean_reg)])
 
                 def unpack_params(x):
-                    return {'lengthscale': np.exp(x[0]), 'support_radius': np.exp(x[1]),
+                    return {'lengthscale': np.exp(x[0]), 'signal_variance': np.exp(x[1]),
                            'noise': np.exp(x[2]), 'mean_regularization': np.exp(x[3])}
 
                 x0 = pack_params(initial_params.get('lengthscale', 1.0),
-                               initial_params.get('support_radius', 2.0),
+                               initial_params.get('signal_variance', 1.0),
                                initial_params.get('noise', 0.1),
                                mean_regularization_strength)
-                bounds = [(-2, 2), (-1, 2), (-6, 0), (-6, 1)]
+                bounds = [(-2, 2), (-2, 2), (-6, 0), (-6, 1)]
             else:
-                # Optimize: log_lengthscale, log_support_radius, log_noise
-                def pack_params(lengthscale, support_radius, noise):
-                    return np.array([np.log(lengthscale), np.log(support_radius), np.log(noise)])
+                # Optimize: log_lengthscale, log_signal_variance, log_noise
+                def pack_params(lengthscale, signal_variance, noise):
+                    return np.array([np.log(lengthscale), np.log(signal_variance), np.log(noise)])
 
                 def unpack_params(x):
-                    return {'lengthscale': np.exp(x[0]), 'support_radius': np.exp(x[1]),
+                    return {'lengthscale': np.exp(x[0]), 'signal_variance': np.exp(x[1]),
                            'noise': np.exp(x[2])}
 
                 x0 = pack_params(initial_params.get('lengthscale', 1.0),
+                               initial_params.get('signal_variance', 1.0),
+                               initial_params.get('noise', 0.1))
+                bounds = [(-2, 2), (-2, 2), (-6, 0)]
+
+        elif kernel_type == 'matern':
+            # Same hyperparameters as RBF: lengthscale, signal_variance and noise
+            if use_basis_mean and joint_inference and Phi_train is not None:
+                def pack_params(lengthscale, signal_variance, noise, mean_reg):
+                    return np.array([np.log(lengthscale), np.log(signal_variance),
+                                   np.log(noise), np.log(mean_reg)])
+
+                def unpack_params(x):
+                    return {'lengthscale': np.exp(x[0]), 'signal_variance': np.exp(x[1]),
+                           'noise': np.exp(x[2]), 'mean_regularization': np.exp(x[3])}
+
+                x0 = pack_params(initial_params.get('lengthscale', 1.0),
+                               initial_params.get('signal_variance', 1.0),
+                               initial_params.get('noise', 0.1),
+                               mean_regularization_strength)
+                bounds = [(-2, 2), (-2, 2), (-6, 0), (-6, 1)]
+            else:
+                def pack_params(lengthscale, signal_variance, noise):
+                    return np.array([np.log(lengthscale), np.log(signal_variance), np.log(noise)])
+
+                def unpack_params(x):
+                    return {'lengthscale': np.exp(x[0]), 'signal_variance': np.exp(x[1]),
+                           'noise': np.exp(x[2])}
+
+                x0 = pack_params(initial_params.get('lengthscale', 1.0),
+                               initial_params.get('signal_variance', 1.0),
+                               initial_params.get('noise', 0.1))
+                bounds = [(-2, 2), (-2, 2), (-6, 0)]
+
+        elif kernel_type == 'bump':
+            if use_basis_mean and joint_inference and Phi_train is not None:
+                def pack_params(lengthscale, signal_variance, support_radius, noise, mean_reg):
+                    return np.array([np.log(lengthscale), np.log(signal_variance),
+                                   np.log(support_radius), np.log(noise), np.log(mean_reg)])
+
+                def unpack_params(x):
+                    return {'lengthscale': np.exp(x[0]), 'signal_variance': np.exp(x[1]),
+                           'support_radius': np.exp(x[2]), 'noise': np.exp(x[3]),
+                           'mean_regularization': np.exp(x[4])}
+
+                x0 = pack_params(initial_params.get('lengthscale', 1.0),
+                               initial_params.get('signal_variance', 1.0),
+                               initial_params.get('support_radius', 2.0),
+                               initial_params.get('noise', 0.1),
+                               mean_regularization_strength)
+                bounds = [(-2, 2), (-2, 2), (-1, 2), (-6, 0), (-6, 1)]
+            else:
+                def pack_params(lengthscale, signal_variance, support_radius, noise):
+                    return np.array([np.log(lengthscale), np.log(signal_variance),
+                                   np.log(support_radius), np.log(noise)])
+
+                def unpack_params(x):
+                    return {'lengthscale': np.exp(x[0]), 'signal_variance': np.exp(x[1]),
+                           'support_radius': np.exp(x[2]), 'noise': np.exp(x[3])}
+
+                x0 = pack_params(initial_params.get('lengthscale', 1.0),
+                               initial_params.get('signal_variance', 1.0),
                                initial_params.get('support_radius', 2.0),
                                initial_params.get('noise', 0.1))
-                bounds = [(-2, 2), (-1, 2), (-6, 0)]
+                bounds = [(-2, 2), (-2, 2), (-1, 2), (-6, 0)]
 
         elif kernel_type == 'polynomial':
             # Optimize: log_sigma, log_noise (keep degree fixed)
@@ -888,6 +984,38 @@ def _(cho_factor, cho_solve, np):
                 x0 = pack_params(initial_params.get('sigma', 0.1),
                                initial_params.get('noise', 0.1))
                 bounds = [(-3, 1), (-6, 0)]
+
+        elif kernel_type == 'custom':
+            if custom_code is None:
+                raise ValueError("custom_code required for custom kernel")
+
+            if use_basis_mean and joint_inference and Phi_train is not None:
+                def pack_params(lengthscale, signal_variance, noise, mean_reg):
+                    return np.array([np.log(lengthscale), np.log(signal_variance),
+                                   np.log(noise), np.log(mean_reg)])
+
+                def unpack_params(x):
+                    return {'lengthscale': np.exp(x[0]), 'signal_variance': np.exp(x[1]),
+                           'noise': np.exp(x[2]), 'mean_regularization': np.exp(x[3]),
+                           'custom_code': custom_code}
+
+                x0 = pack_params(initial_params.get('lengthscale', 1.0),
+                               initial_params.get('signal_variance', 1.0),
+                               initial_params.get('noise', 0.1),
+                               mean_regularization_strength)
+                bounds = [(-2, 2), (-2, 2), (-6, 0), (-6, 1)]
+            else:
+                def pack_params(lengthscale, signal_variance, noise):
+                    return np.array([np.log(lengthscale), np.log(signal_variance), np.log(noise)])
+
+                def unpack_params(x):
+                    return {'lengthscale': np.exp(x[0]), 'signal_variance': np.exp(x[1]),
+                           'noise': np.exp(x[2]), 'custom_code': custom_code}
+
+                x0 = pack_params(initial_params.get('lengthscale', 1.0),
+                               initial_params.get('signal_variance', 1.0),
+                               initial_params.get('noise', 0.1))
+                bounds = [(-2, 2), (-2, 2), (-6, 0)]
         else:
             raise ValueError(f"Unknown kernel type: {kernel_type}")
 
@@ -909,9 +1037,26 @@ def _(cho_factor, cho_solve, np):
             # Return negative for minimization
             return -log_ml
 
-        # Optimize
-        result = minimize(neg_log_marginal_likelihood, x0, bounds=bounds,
-                         method='L-BFGS-B', options={'maxiter': max_iter})
+        # Optimize - use L-BFGS-B with Nelder-Mead fallback for custom kernels
+        if kernel_type == 'custom':
+            # Custom kernels may have non-smooth objectives; try L-BFGS-B first
+            try:
+                result = minimize(neg_log_marginal_likelihood, x0, bounds=bounds,
+                                 method='L-BFGS-B', options={'maxiter': max_iter})
+                if not result.success or not np.isfinite(result.fun):
+                    raise RuntimeError("L-BFGS-B failed")
+            except Exception:
+                # Fallback to derivative-free Nelder-Mead (no native bounds)
+                def bounded_objective(x):
+                    x_clipped = np.clip(x, [b[0] for b in bounds], [b[1] for b in bounds])
+                    return neg_log_marginal_likelihood(x_clipped)
+                result = minimize(bounded_objective, x0, method='Nelder-Mead',
+                                 options={'maxiter': max_iter * 10, 'xatol': 1e-4, 'fatol': 1e-4})
+                # Clip result to bounds
+                result.x = np.clip(result.x, [b[0] for b in bounds], [b[1] for b in bounds])
+        else:
+            result = minimize(neg_log_marginal_likelihood, x0, bounds=bounds,
+                             method='L-BFGS-B', options={'maxiter': max_iter})
 
         optimized_params = unpack_params(result.x)
         log_ml = -result.fun
@@ -1003,12 +1148,13 @@ def _(cho_factor, cho_solve, np):
         # Compute kernel matrices
         if kernel_type == 'bump':
             lengthscale = kernel_params.get('lengthscale', 1.0)
+            signal_variance = kernel_params.get('signal_variance', 1.0)
             support_radius = kernel_params.get('support_radius', 2.0)
             noise = max(noise, 1e-4)  # Higher noise for stability
 
-            K_train = bump_kernel(X_train, X_train, lengthscale, support_radius)
-            K_test_train = bump_kernel(X_test, X_train, lengthscale, support_radius)
-            K_test = bump_kernel(X_test, X_test, lengthscale, support_radius)
+            K_train = bump_kernel(X_train, X_train, lengthscale, support_radius, signal_variance)
+            K_test_train = bump_kernel(X_test, X_train, lengthscale, support_radius, signal_variance)
+            K_test = bump_kernel(X_test, X_test, lengthscale, support_radius, signal_variance)
 
         elif kernel_type == 'polynomial':
             degree = min(kernel_params.get('degree', 10), 8)  # Cap at 8
@@ -1021,19 +1167,37 @@ def _(cho_factor, cho_solve, np):
 
         elif kernel_type == 'rbf':
             lengthscale = kernel_params.get('lengthscale', 1.0)
+            signal_variance = kernel_params.get('signal_variance', 1.0)
             noise = max(noise, 1e-6)
 
-            K_train = rbf_kernel(X_train, X_train, lengthscale)
-            K_test_train = rbf_kernel(X_test, X_train, lengthscale)
-            K_test = rbf_kernel(X_test, X_test, lengthscale)
+            K_train = rbf_kernel(X_train, X_train, lengthscale, signal_variance)
+            K_test_train = rbf_kernel(X_test, X_train, lengthscale, signal_variance)
+            K_test = rbf_kernel(X_test, X_test, lengthscale, signal_variance)
 
         elif kernel_type == 'matern':
             lengthscale = kernel_params.get('lengthscale', 1.0)
+            signal_variance = kernel_params.get('signal_variance', 1.0)
             noise = max(noise, 1e-6)
 
-            K_train = matern_kernel(X_train, X_train, lengthscale)
-            K_test_train = matern_kernel(X_test, X_train, lengthscale)
-            K_test = matern_kernel(X_test, X_test, lengthscale)
+            K_train = matern_kernel(X_train, X_train, lengthscale, signal_variance)
+            K_test_train = matern_kernel(X_test, X_train, lengthscale, signal_variance)
+            K_test = matern_kernel(X_test, X_test, lengthscale, signal_variance)
+
+        elif kernel_type == 'custom':
+            lengthscale = kernel_params.get('lengthscale', 1.0)
+            signal_variance = kernel_params.get('signal_variance', 1.0)
+            custom_code = kernel_params.get('custom_code', '')
+            noise = max(noise, 1e-6)
+
+            K_train, err = custom_kernel(X_train, X_train, lengthscale, signal_variance, custom_code)
+            if err:
+                raise ValueError(f"Custom kernel error: {err}")
+            K_test_train, err = custom_kernel(X_test, X_train, lengthscale, signal_variance, custom_code)
+            if err:
+                raise ValueError(f"Custom kernel error: {err}")
+            K_test, err = custom_kernel(X_test, X_test, lengthscale, signal_variance, custom_code)
+            if err:
+                raise ValueError(f"Custom kernel error: {err}")
 
         else:
             raise ValueError(f"Unknown kernel type: {kernel_type}")
@@ -1137,9 +1301,11 @@ def _(cho_factor, cho_solve, np):
     return (
         bump_kernel,
         compute_kernel_matrix,
+        custom_kernel,
         fit_gp_numpy,
         gp_loo_log_likelihood,
         gp_marginal_likelihood,
+        gp_sample_posterior,
         matern_kernel,
         optimize_gp_hyperparameters,
         polynomial_kernel,
@@ -1418,6 +1584,7 @@ def _(
     get_calib_frac,
     get_custom_basis_code,
     get_custom_function_code,
+    get_custom_kernel_code,
     get_filter_invert,
     get_filter_max,
     get_filter_min,
@@ -1425,9 +1592,11 @@ def _(
     get_gp_kernel_type,
     get_gp_lengthscale,
     get_gp_mean_regularization,
+    get_gp_signal_variance,
     get_gp_support_radius,
     get_last_enabled_method,
     get_leverage_percentile,
+    get_n_posterior_samples,
     get_nn_activation,
     get_nn_ensemble_method,
     get_nn_ensemble_size,
@@ -1439,9 +1608,11 @@ def _(
     get_quantile_confidence,
     get_quantile_regularization,
     get_seed,
+    get_show_samples,
     get_zeta,
     gp_loo_log_likelihood,
     gp_marginal_likelihood,
+    gp_sample_posterior,
     gp_regression,
     gp_use_basis_mean,
     make_custom_features,
@@ -1457,6 +1628,7 @@ def _(
     pops,
     quantile,
     rbf_kernel,
+    custom_kernel,
     seed,
     sigma,
     train_test_split,
@@ -1504,6 +1676,7 @@ def _(
     # Store basis parameters for visualization
     rbf_centers, rbf_sigma, fourier_L, lj_offset = None, None, None, None
     _custom_basis_error = None  # Track custom basis errors
+    _custom_kernel_error = None  # Track custom kernel errors
 
     if basis_type == 'polynomial':
         poly = PolynomialFeatures(degree=P-1, include_bias=True)
@@ -1579,6 +1752,14 @@ def _(
     bayes_log_ml = 0.0  # Initialize
     gp_sparsity = 0.0  # Initialize GP covariance sparsity
 
+    # Test custom kernel if selected
+    if get_gp_kernel_type() == 'custom':
+        _test_K, _custom_kernel_error = custom_kernel(
+            X_train[:, 0], X_train[:, 0],
+            get_gp_lengthscale(), get_gp_signal_variance(),
+            get_custom_kernel_code()
+        )
+
     # Dictionary to store predictions and metrics for each method
     import time
     method_predictions = {}  # {label: (y_pred, y_std, fit_time)}
@@ -1590,6 +1771,10 @@ def _(
     # Show warning in plot if there's an error
     if _custom_basis_error is not None:
         ax.text(0.5, 0.5, '⚠️ Custom basis error', transform=ax.transAxes,
+                fontsize=14, ha='center', va='center', color='orange',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='orange'))
+    elif _custom_kernel_error is not None and gp_regression.value:
+        ax.text(0.5, 0.5, '⚠️ Custom kernel error', transform=ax.transAxes,
                 fontsize=14, ha='center', va='center', color='orange',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='orange'))
     elif not _has_valid_data:
@@ -1606,7 +1791,7 @@ def _(
             models_to_plot.append((p, Phi_train, Phi_test, 'C0', 'POPS regression', True))
         if quantile.value:
             models_to_plot.append((q, Phi_train, Phi_test, 'C4', 'Quantile regression', True))
-        if gp_regression.value:
+        if gp_regression.value and _custom_kernel_error is None:
             models_to_plot.append((None, X_train, X_test, 'C3', 'GP regression', False))
         if neural_network.value:
             models_to_plot.append((None, X_train, X_test, 'C5', 'Neural network', False))
@@ -1626,6 +1811,7 @@ def _(
                 X_train_model[:, 0], y_train, X_test_model[:, 0],
                 kernel_type=get_gp_kernel_type(),
                 lengthscale=get_gp_lengthscale(),
+                signal_variance=get_gp_signal_variance(),
                 support_radius=get_gp_support_radius(),
                 degree=get_P(),
                 sigma=1.0,
@@ -1634,15 +1820,18 @@ def _(
                 Phi_train=Phi_train if gp_use_basis_mean.value else None,
                 Phi_test=Phi_test if gp_use_basis_mean.value else None,
                 joint_inference=get_gp_joint_inference(),
-                mean_regularization_strength=get_gp_mean_regularization()
+                mean_regularization_strength=get_gp_mean_regularization(),
+                custom_code=get_custom_kernel_code() if get_gp_kernel_type() == 'custom' else None
             )
 
             # Compute log marginal likelihood for display
             params = {
                 'lengthscale': get_gp_lengthscale(),
+                'signal_variance': get_gp_signal_variance(),
                 'support_radius': get_gp_support_radius(),
                 'degree': get_P(),
-                'sigma': 1.0
+                'sigma': 1.0,
+                'custom_code': get_custom_kernel_code() if get_gp_kernel_type() == 'custom' else None
             }
             K_train = compute_kernel_matrix(X_train_model[:, 0], X_train_model[:, 0],
                                            get_gp_kernel_type(), params)
@@ -1756,22 +1945,26 @@ def _(
             y_pred_train, y_std_train = fit_gp_numpy(
                 X_train[:, 0], y_train, X_train[:, 0],
                 kernel_type=get_gp_kernel_type(), lengthscale=get_gp_lengthscale(),
+                signal_variance=get_gp_signal_variance(),
                 support_radius=get_gp_support_radius(), degree=get_P(), sigma=1.0,
                 noise=sigma.value**2, use_basis_mean=gp_use_basis_mean.value,
                 Phi_train=Phi_train if gp_use_basis_mean.value else None,
                 Phi_test=Phi_train if gp_use_basis_mean.value else None,
                 joint_inference=get_gp_joint_inference(),
-                mean_regularization_strength=get_gp_mean_regularization()
+                mean_regularization_strength=get_gp_mean_regularization(),
+                custom_code=get_custom_kernel_code() if get_gp_kernel_type() == 'custom' else None
             )[:2]
             y_pred_calib, y_std_calib = fit_gp_numpy(
                 X_train[:, 0], y_train, X_calib[:, 0],
                 kernel_type=get_gp_kernel_type(), lengthscale=get_gp_lengthscale(),
+                signal_variance=get_gp_signal_variance(),
                 support_radius=get_gp_support_radius(), degree=get_P(), sigma=1.0,
                 noise=sigma.value**2, use_basis_mean=gp_use_basis_mean.value,
                 Phi_train=Phi_train if gp_use_basis_mean.value else None,
                 Phi_test=Phi_calib if gp_use_basis_mean.value else None,
                 joint_inference=get_gp_joint_inference(),
-                mean_regularization_strength=get_gp_mean_regularization()
+                mean_regularization_strength=get_gp_mean_regularization(),
+                custom_code=get_custom_kernel_code() if get_gp_kernel_type() == 'custom' else None
             )[:2]
             # Add aleatoric uncertainty if GP aleatoric checkbox is enabled
             if aleatoric_gp.value:
@@ -1813,6 +2006,67 @@ def _(
         else:
             ax.fill_between(X_test[:, 0], y_pred - y_std, y_pred + y_std, alpha=0.5, color=color, label=label)
 
+        # Draw posterior/ensemble samples if enabled (per-method controls)
+        if label in ['Bayesian uncertainty', 'Conformal prediction'] and get_show_samples_linear():
+            # Sample from Bayesian posterior
+            try:
+                samples = model.sample_posterior(X_test_model, n_samples=get_n_samples_linear())
+                for i in range(samples.shape[1]):
+                    ax.plot(X_test[:, 0], samples[:, i], color=color, alpha=0.4, lw=1)
+            except Exception:
+                pass  # Skip if sampling fails
+
+        elif label == 'GP regression' and get_show_samples_gp():
+            # Sample from GP posterior
+            try:
+                _gp_params = {
+                    'lengthscale': get_gp_lengthscale(),
+                    'signal_variance': get_gp_signal_variance(),
+                    'support_radius': get_gp_support_radius(),
+                    'degree': get_P(), 'sigma': 1.0,
+                    'custom_code': get_custom_kernel_code() if get_gp_kernel_type() == 'custom' else None
+                }
+                _K_train = compute_kernel_matrix(X_train[:, 0], X_train[:, 0], get_gp_kernel_type(), _gp_params)
+                _K_test_train = compute_kernel_matrix(X_test[:, 0], X_train[:, 0], get_gp_kernel_type(), _gp_params)
+                _K_test = compute_kernel_matrix(X_test[:, 0], X_test[:, 0], get_gp_kernel_type(), _gp_params)
+                gp_samples = gp_sample_posterior(X_train[:, 0], y_train, X_test[:, 0],
+                                                  _K_train, _K_test_train, _K_test,
+                                                  sigma.value**2, n_samples=get_n_samples_gp())
+                for i in range(gp_samples.shape[1]):
+                    ax.plot(X_test[:, 0], gp_samples[:, i], color=color, alpha=0.4, lw=1)
+            except Exception:
+                pass  # Skip if sampling fails
+
+        elif label == 'Neural network' and get_show_samples_nn():
+            # Show ensemble members (limited by samples slider)
+            try:
+                ensemble_preds = nn.predict_ensemble(X_test_model)
+                n_available = ensemble_preds.shape[1]
+                n_to_show = min(get_n_samples_nn(), n_available)
+                indices = np.random.choice(n_available, n_to_show, replace=False) if n_to_show < n_available else range(n_available)
+                for i in indices:
+                    ax.plot(X_test[:, 0], ensemble_preds[:, i], color=color, alpha=0.4, lw=1)
+            except Exception:
+                pass  # Skip if ensemble not available
+
+        elif label == 'POPS regression' and get_show_samples_linear():
+            # POPS stores ensemble in posterior_samples with shape (n_features, n_samples)
+            # posterior_samples are DEVIATIONS from coef_, so add coef_ to get actual coefficients
+            try:
+                if hasattr(model, 'posterior_samples'):
+                    samples = model.posterior_samples  # (n_features, n_samples)
+                    n_available = samples.shape[1]
+                    n_to_show = min(get_n_samples_linear(), n_available)
+                    indices = np.random.choice(n_available, n_to_show, replace=False) if n_to_show < n_available else range(n_available)
+                    for i in indices:
+                        sample_coef = model.coef_ + samples[:, i]
+                        pops_pred = X_test_model @ sample_coef + model.intercept_
+                        ax.plot(X_test[:, 0], pops_pred, color=color, alpha=0.4, lw=1)
+            except Exception:
+                pass  # POPS may not expose samples in this version
+
+        # Quantile regression: skip (no posterior to sample)
+
     # No title needed - all info is in the dashboard and outputs bar
     ax.set_xlim(-10, 10)
     ax.set_ylim(-1.5, 1.5)
@@ -1844,19 +2098,34 @@ def _(
             # Plot kernel function
             x_kernel = np.linspace(0, 2.0, 100)
             kernel_type = get_gp_kernel_type()
+            K_values = None
 
             if kernel_type == 'rbf':
-                K_values = rbf_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale())[0, :]
+                K_values = rbf_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale(), get_gp_signal_variance())[0, :]
             elif kernel_type == 'bump':
-                K_values = bump_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale(), get_gp_support_radius())[0, :]
+                K_values = bump_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale(), get_gp_support_radius(), get_gp_signal_variance())[0, :]
                 # Add vertical line for support radius
                 axins.axvline(get_gp_support_radius(), color='k', ls='dashed', lw=0.8, alpha=0.5)
             elif kernel_type == 'matern':
-                K_values = matern_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale())[0, :]
+                K_values = matern_kernel(np.array([0.0]), x_kernel, get_gp_lengthscale(), get_gp_signal_variance())[0, :]
             elif kernel_type == 'polynomial':
                 K_values = polynomial_kernel(np.array([0.0]), x_kernel, get_P(), 1.0)[0, :]
+            elif kernel_type == 'custom':
+                try:
+                    K_result, err = custom_kernel(
+                        np.array([0.0]), x_kernel,
+                        get_gp_lengthscale(), get_gp_signal_variance(),
+                        get_custom_kernel_code()
+                    )
+                    if K_result is not None:
+                        K_values = K_result[0, :]
+                    else:
+                        axins.text(0.5, 0.5, '⚠️', transform=axins.transAxes, ha='center', fontsize=14)
+                except Exception:
+                    axins.text(0.5, 0.5, '⚠️', transform=axins.transAxes, ha='center', fontsize=14)
 
-            axins.plot(x_kernel, K_values, 'C3', lw=1.5)
+            if K_values is not None:
+                axins.plot(x_kernel, K_values, 'C3', lw=1.5)
             axins.set_xlabel('$r$', fontsize=8)
             axins.set_ylabel('$K(0, r)$', fontsize=8)
             axins.set_title(f'Kernel: {kernel_type}', fontsize=9, pad=3)
@@ -2029,6 +2298,7 @@ def _(
     get_calib_frac,
     get_custom_basis_code,
     get_custom_function_code,
+    get_custom_kernel_code,
     get_filter_invert,
     get_filter_max,
     get_filter_min,
@@ -2037,6 +2307,7 @@ def _(
     get_gp_kernel_type,
     get_gp_mean_regularization,
     get_leverage_percentile,
+    get_n_posterior_samples,
     get_nn_activation,
     get_nn_ensemble_method,
     get_nn_ensemble_size,
@@ -2048,6 +2319,7 @@ def _(
     get_quantile_confidence,
     get_quantile_regularization,
     get_seed,
+    get_show_samples,
     get_sigma,
     get_zeta,
     gp_optimize_button,
@@ -2066,6 +2338,7 @@ def _(
     set_calib_frac,
     set_custom_basis_code,
     set_custom_function_code,
+    set_custom_kernel_code,
     set_filter_invert,
     set_filter_max,
     set_filter_min,
@@ -2074,8 +2347,10 @@ def _(
     set_gp_kernel_type,
     set_gp_lengthscale,
     set_gp_mean_regularization,
+    set_gp_signal_variance,
     set_gp_support_radius,
     set_leverage_percentile,
+    set_n_posterior_samples,
     set_nn_activation,
     set_nn_ensemble_method,
     set_nn_ensemble_size,
@@ -2089,6 +2364,7 @@ def _(
     set_seed,
     set_sigma,
     set_zeta,
+    show_samples_checkbox,
 ):
     # NOTE: This cell does NOT depend on get_P, get_gp_lengthscale, or get_gp_support_radius
     # to avoid circular dependency with optimization cells that modify those values
@@ -2148,6 +2424,8 @@ def _(
         else:
             basis_lengthscale_slider = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.5, 10.0, 0.5, get_basis_lengthscale(), label='Basis lengthscale', disabled=True)}</div>")
         aleatoric = mo.ui.checkbox(False, label="Include aleatoric uncertainty")
+        show_samples_linear = mo.ui.checkbox(get_show_samples_linear(), label="Show posterior samples", on_change=set_show_samples_linear)
+        n_samples_linear_slider = mo.ui.slider(5, 20, 1, get_n_samples_linear(), label="Samples to draw", on_change=set_n_samples_linear)
         reg_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>")
     else:
         P_slider = None  # No slider when disabled
@@ -2156,6 +2434,8 @@ def _(
         basis_dropdown = mo.Html(f"<div style='opacity: 0.4; display: flex; justify-content: space-between; align-items: center;'><span>Basis type</span><select disabled style='padding: 4px;'><option>{get_basis_type()}</option></select></div>")
         basis_lengthscale_slider = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.5, 10.0, 0.5, 2.0, label='Basis lengthscale', disabled=True)}</div>")
         aleatoric = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Include aleatoric uncertainty', disabled=True)}</div>")
+        show_samples_linear = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Show posterior samples', disabled=True)}</div>")
+        n_samples_linear_slider = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 20, 1, 10, label='Samples to draw', disabled=True)}</div>")
         reg_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
 
     # Conformal prediction section with conditional styling
@@ -2194,8 +2474,10 @@ def _(
     # GP regression section with conditional styling
     if gp_regression.value:
         aleatoric_gp = mo.ui.checkbox(False, label="Include aleatoric uncertainty")
+        show_samples_gp = mo.ui.checkbox(get_show_samples_gp(), label="Show posterior samples", on_change=set_show_samples_gp)
+        n_samples_gp_slider = mo.ui.slider(5, 20, 1, get_n_samples_gp(), label="Samples to draw", on_change=set_n_samples_gp)
         gp_kernel_dropdown = mo.ui.dropdown(
-            options=['rbf', 'matern', 'bump'],
+            options=['rbf', 'matern', 'bump', 'custom'],
             value=get_gp_kernel_type(),
             label='Kernel type',
             on_change=set_gp_kernel_type
@@ -2203,6 +2485,7 @@ def _(
         # Use fixed default values (not state) to avoid circular dependency
         # Manual slider changes still update state via on_change, but sliders don't react to state changes
         gp_lengthscale_slider = mo.ui.slider(0.1, 5.0, 0.1, 0.5, label='Lengthscale', on_change=set_gp_lengthscale)
+        gp_signal_variance_slider = mo.ui.slider(0.1, 5.0, 0.1, 1.0, label='Signal variance', on_change=set_gp_signal_variance)
         gp_support_radius_slider = mo.ui.slider(0.5, 5.0, 0.1, 1.5, label='Support radius (bump only)', on_change=set_gp_support_radius)
 
         # gp_use_basis_mean checkbox is now created in a separate cell and passed in as dependency
@@ -2220,6 +2503,7 @@ def _(
             gp_mean_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 1, 0.1, _log_reg, label='Mean regularization (log₁₀)', disabled=True)}</div>")
 
         gp_lengthscale = gp_lengthscale_slider  # For display
+        gp_signal_variance = gp_signal_variance_slider  # For display
         gp_support_radius = gp_support_radius_slider  # For display
         gp_opt_button_elem = gp_optimize_button
         # Add horizontal separator between kernel hyperparameters and mean function controls
@@ -2228,11 +2512,15 @@ def _(
         gp_use_basis_mean_elem = gp_use_basis_mean
     else:
         aleatoric_gp = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Include aleatoric uncertainty', disabled=True)}</div>")
+        show_samples_gp = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Show posterior samples', disabled=True)}</div>")
+        n_samples_gp_slider = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(5, 20, 1, 10, label='Samples to draw', disabled=True)}</div>")
         # Dropdown doesn't have disabled attribute, just show greyed out
-        gp_kernel_dropdown = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{mo.ui.dropdown(['rbf', 'matern', 'bump'], value='rbf', label='Kernel type')}</div>")
+        gp_kernel_dropdown = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{mo.ui.dropdown(['rbf', 'matern', 'bump', 'custom'], value='rbf', label='Kernel type')}</div>")
         gp_lengthscale_slider = None  # No slider when disabled
+        gp_signal_variance_slider = None  # No slider when disabled
         gp_support_radius_slider = None  # No slider when disabled
         gp_lengthscale = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.1, 5.0, 0.1, 0.5, label='Lengthscale', disabled=True)}</div>")
+        gp_signal_variance = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.1, 5.0, 0.1, 1.0, label='Signal variance', disabled=True)}</div>")
         gp_support_radius = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(0.5, 5.0, 0.1, 1.5, label='Support radius (bump only)', disabled=True)}</div>")
         gp_separator = mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd; opacity: 0.4;'>")
         # Wrap gp_use_basis_mean checkbox with disabled styling when GP regression is off
@@ -2260,6 +2548,8 @@ def _(
         _log_reg_nn = get_nn_regularization()
         nn_regularization = mo.ui.slider(-6, 0, 0.5, _log_reg_nn, label='Regularization (log₁₀)', on_change=set_nn_regularization)
         nn_ensemble_size = mo.ui.slider(3, 10, 1, get_nn_ensemble_size(), label='Ensemble size', on_change=set_nn_ensemble_size)
+        show_samples_nn = mo.ui.checkbox(get_show_samples_nn(), label="Show ensemble samples", on_change=set_show_samples_nn)
+        n_samples_nn_slider = mo.ui.slider(3, 10, 1, get_n_samples_nn(), label="Samples to draw", on_change=set_n_samples_nn)
     else:
         nn_activation = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{mo.ui.dropdown(['tanh'], value='tanh', label='Activation function')}</div>")
         nn_ensemble_method = mo.Html(f"<div style='opacity: 0.4; pointer-events: none;'>{mo.ui.dropdown(['seed', 'bootstrap'], value='seed', label='Ensemble method')}</div>")
@@ -2267,11 +2557,14 @@ def _(
         nn_num_layers = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(1, 3, 1, get_nn_num_layers(), label='Hidden layers', disabled=True)}</div>")
         nn_regularization = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(-6, 0, 0.5, -3, label='Regularization (log₁₀)', disabled=True)}</div>")
         nn_ensemble_size = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(3, 10, 1, 5, label='Ensemble size', disabled=True)}</div>")
+        show_samples_nn = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.checkbox(False, label='Show ensemble samples', disabled=True)}</div>")
+        n_samples_nn_slider = mo.Html(f"<div style='opacity: 0.4;'>{mo.ui.slider(3, 10, 1, 5, label='Samples to draw', disabled=True)}</div>")
 
     # Linear Methods tab: Two-column layout
     # First column: Shared settings, Bayesian fit, and Quantile regression
     linear_col1 = mo.vstack([
         P_elem, basis_dropdown, basis_lengthscale_slider, aleatoric,
+        show_samples_linear, n_samples_linear_slider,
         mo.Html("<hr style='margin: 10px 0; border: 0; border-top: 1px solid #ddd;'>"),
         mo.left(bayesian),
         mo.Html("<hr style='margin: 5px 0; border: 0; border-top: 1px solid #ddd;'>"),
@@ -2290,7 +2583,7 @@ def _(
         percentile_clipping
     ])
 
-    linear_methods_tab = mo.Html(f'''
+    linear_methods_content = mo.Html(f'''
     <div style="display: flex; gap: 20px;">
         <div style="width: 50%; min-width: 200px;">
             {linear_col1}
@@ -2305,7 +2598,8 @@ def _(
     kernel_col1 = mo.vstack([
         mo.left(gp_regression),
         aleatoric_gp,
-        gp_kernel_dropdown, gp_lengthscale, gp_support_radius,
+        show_samples_gp, n_samples_gp_slider,
+        gp_kernel_dropdown, gp_lengthscale, gp_signal_variance, gp_support_radius,
         gp_opt_button_elem
     ])
 
@@ -2314,7 +2608,7 @@ def _(
         gp_joint_inference, gp_mean_regularization
     ])
 
-    kernel_methods_tab = mo.Html(f'''
+    kernel_methods_content = mo.Html(f'''
     <div style="display: flex; gap: 20px;">
         <div style="width: 50%; min-width: 200px;">
             {kernel_col1}
@@ -2328,62 +2622,75 @@ def _(
     # Non-linear Methods tab: Single column with checkbox at top
     nonlinear_methods_tab = mo.vstack([
         mo.left(neural_network),
+        show_samples_nn, n_samples_nn_slider,
         nn_activation,
         nn_ensemble_method,
         nn_hidden_units, nn_num_layers,
         nn_regularization, nn_ensemble_size
     ])
 
-    # Custom Function tab: Code editor for custom ground truth
+    # Custom Function code editor (in accordion, collapsed by default)
     custom_code_editor = mo.ui.code_editor(
         value=get_custom_function_code(),
         language="python",
         min_height=200,
         on_change=set_custom_function_code,
     )
-    custom_function_tab = mo.vstack([
-        mo.md("Define `y = f(X)`. Available: `np`, `scipy`, `math`, `X`. ⚠️ Avoid infinite loops."),
-        custom_code_editor,
-    ])
+    custom_function_accordion = mo.accordion({
+        "Custom Function Code": mo.vstack([
+            mo.md("Define `y = f(X)`. Available: `np`, `scipy`, `math`, `X`. Avoid infinite loops."),
+            custom_code_editor,
+        ])
+    }, lazy=True)
 
-    # Custom Basis tab: Code editor for custom basis functions
+    # Custom Basis code editor (in accordion, collapsed by default)
     custom_basis_editor = mo.ui.code_editor(
         value=get_custom_basis_code(),
         language="python",
         min_height=200,
         on_change=set_custom_basis_code,
     )
-    custom_basis_tab = mo.vstack([
-        mo.md("Define `features` (n×P matrix). Available: `np`, `scipy`, `math`, `X`, `P`. ⚠️ Avoid infinite loops."),
-        custom_basis_editor,
+    custom_basis_accordion = mo.accordion({
+        "Custom Basis Code": mo.vstack([
+            mo.md("Define `features` (n×P matrix). Available: `np`, `scipy`, `math`, `X`, `P`. Avoid infinite loops."),
+            custom_basis_editor,
+        ])
+    }, lazy=True)
+
+    # Custom Kernel code editor (in accordion, collapsed by default)
+    custom_kernel_editor = mo.ui.code_editor(
+        value=get_custom_kernel_code(),
+        language="python",
+        min_height=200,
+        on_change=set_custom_kernel_code,
+    )
+    custom_kernel_accordion = mo.accordion({
+        "Custom Kernel Code": mo.vstack([
+            mo.md("Define `K` matrix (n1×n2). Available: `np`, `scipy`, `math`, `X1`, `X2`, `lengthscale`, `signal_variance`. Avoid infinite loops."),
+            custom_kernel_editor,
+        ])
+    }, lazy=True)
+
+    # Data tab: Dataset parameters + custom function accordion
+    data_tab = mo.vstack([
+        mo.hstack([function_dropdown, N_samples, sigma], justify="start"),
+        mo.hstack([filter_range, filter_invert, seed], justify="start"),
+        custom_function_accordion,
     ])
 
-    # Create tabs for method-specific parameters
+    # Assemble final tabs with accordions
+    linear_methods_tab = mo.vstack([linear_methods_content, custom_basis_accordion])
+    kernel_methods_tab = mo.vstack([kernel_methods_content, custom_kernel_accordion])
+
+    # Create tabs for method-specific parameters (Data first)
     method_params_tabs = mo.ui.tabs({
+        "Data": data_tab,
         "Linear Methods": linear_methods_tab,
         "Kernel Methods": kernel_methods_tab,
         "Non-linear Methods": nonlinear_methods_tab,
-        "Custom Function": custom_function_tab,
-        "Custom Basis": custom_basis_tab
     })
 
-    # Two-column layout: Dataset parameters on left, Tabs on right
-    dataset_column = mo.Html(f'''
-    <div style="width: 30%; min-width: 200px;">
-        {mo.vstack([data_label, function_dropdown, N_samples, filter_range, filter_invert, sigma, seed])}
-    </div>
-    ''')
-
-    tabs_column = mo.Html(f'''
-    <div style="width: 70%; min-width: 400px;">
-        {method_params_tabs}
-    </div>
-    ''')
-
-    controls = mo.hstack([
-        dataset_column,
-        tabs_column
-    ], gap=0.2)
+    controls = method_params_tabs
 
     mo.Html(f'''
     <div class="app-dashboard">
@@ -2397,6 +2704,7 @@ def _(
         basis_type_dropdown,
         function_dropdown,
         gp_lengthscale_slider,
+        gp_signal_variance_slider,
         gp_support_radius_slider,
         seed,
         sigma,
@@ -2626,10 +2934,18 @@ def _(mo):
     # GP-specific state
     get_gp_kernel_type, set_gp_kernel_type = mo.state('rbf')
     get_gp_lengthscale, set_gp_lengthscale = mo.state(0.5)
+    get_gp_signal_variance, set_gp_signal_variance = mo.state(1.0)
     get_gp_support_radius, set_gp_support_radius = mo.state(1.5)
     # gp_use_basis_mean is now a simple checkbox without state (created in analysis checkboxes cell)
     get_gp_joint_inference, set_gp_joint_inference = mo.state(False)
     get_gp_mean_regularization, set_gp_mean_regularization = mo.state(0.1)
+    # Custom kernel code
+    get_custom_kernel_code, set_custom_kernel_code = mo.state(
+        "# Define K as a 2D kernel matrix (n1 x n2)\n"
+        "# Available: np, scipy, math, X1, X2, lengthscale, signal_variance\n"
+        "dists_sq = (X1[:, None] - X2[None, :]) ** 2\n"
+        "K = signal_variance * np.exp(-0.5 * dists_sq / lengthscale**2)"
+    )
 
     # Neural network-specific state
     get_nn_activation, set_nn_activation = mo.state('tanh')
@@ -2649,6 +2965,16 @@ def _(mo):
 
     # Track last enabled method for inset display
     get_last_enabled_method, set_last_enabled_method = mo.state('linear')
+
+    # Per-method posterior samples state
+    get_show_samples_linear, set_show_samples_linear = mo.state(False)
+    get_n_samples_linear, set_n_samples_linear = mo.state(10)
+
+    get_show_samples_gp, set_show_samples_gp = mo.state(False)
+    get_n_samples_gp, set_n_samples_gp = mo.state(10)
+
+    get_show_samples_nn, set_show_samples_nn = mo.state(False)
+    get_n_samples_nn, set_n_samples_nn = mo.state(10)
     return (
         get_N_samples,
         get_P,
@@ -2658,6 +2984,7 @@ def _(mo):
         get_calib_frac,
         get_custom_basis_code,
         get_custom_function_code,
+        get_custom_kernel_code,
         get_filter_invert,
         get_filter_max,
         get_filter_min,
@@ -2666,9 +2993,13 @@ def _(mo):
         get_gp_kernel_type,
         get_gp_lengthscale,
         get_gp_mean_regularization,
+        get_gp_signal_variance,
         get_gp_support_radius,
         get_last_enabled_method,
         get_leverage_percentile,
+        get_n_samples_gp,
+        get_n_samples_linear,
+        get_n_samples_nn,
         get_nn_activation,
         get_nn_ensemble_method,
         get_nn_ensemble_size,
@@ -2680,6 +3011,9 @@ def _(mo):
         get_quantile_confidence,
         get_quantile_regularization,
         get_seed,
+        get_show_samples_gp,
+        get_show_samples_linear,
+        get_show_samples_nn,
         get_sigma,
         get_zeta,
         set_N_samples,
@@ -2690,6 +3024,7 @@ def _(mo):
         set_calib_frac,
         set_custom_basis_code,
         set_custom_function_code,
+        set_custom_kernel_code,
         set_filter_invert,
         set_filter_max,
         set_filter_min,
@@ -2698,9 +3033,13 @@ def _(mo):
         set_gp_kernel_type,
         set_gp_lengthscale,
         set_gp_mean_regularization,
+        set_gp_signal_variance,
         set_gp_support_radius,
         set_last_enabled_method,
         set_leverage_percentile,
+        set_n_samples_gp,
+        set_n_samples_linear,
+        set_n_samples_nn,
         set_nn_activation,
         set_nn_ensemble_method,
         set_nn_ensemble_size,
@@ -2712,6 +3051,9 @@ def _(mo):
         set_quantile_confidence,
         set_quantile_regularization,
         set_seed,
+        set_show_samples_gp,
+        set_show_samples_linear,
+        set_show_samples_nn,
         set_sigma,
         set_zeta,
     )
@@ -2764,6 +3106,7 @@ def _(
         # Set initial parameters - read from sliders, NOT state getters (avoids circular dependency)
         initial_params = {
             'lengthscale': gp_lengthscale_slider.value,
+            'signal_variance': gp_signal_variance_slider.value,
             'support_radius': gp_support_radius_slider.value,
             'degree': get_P(),
             'sigma': 0.1,
@@ -2799,17 +3142,21 @@ def _(
 
         # Optimize
         opt_lengthscale = None  # Initialize variables used in output formatting
+        opt_signal_variance = None
         opt_support = None
         opt_mean_reg = None
         opt_noise = None
 
         try:
+            _kernel_type = get_gp_kernel_type()
+            _custom_kernel_code = get_custom_kernel_code() if _kernel_type == 'custom' else None
             optimized_params, log_ml = optimize_gp_hyperparameters(
-                _x_train, _y_train, get_gp_kernel_type(), initial_params, max_iter=50,
+                _x_train, _y_train, _kernel_type, initial_params, max_iter=50,
                 use_basis_mean=_use_basis_mean,
                 Phi_train=_Phi_train,
                 joint_inference=_joint_inference,
-                mean_regularization_strength=_mean_reg
+                mean_regularization_strength=_mean_reg,
+                custom_code=_custom_kernel_code
             )
 
             # Update sliders with optimized values
@@ -2817,6 +3164,11 @@ def _(
                 # Clamp to slider bounds [0.1, 5.0]
                 opt_lengthscale = np.clip(optimized_params['lengthscale'], 0.1, 5.0)
                 set_gp_lengthscale(float(opt_lengthscale))
+
+            if 'signal_variance' in optimized_params:
+                # Clamp to slider bounds [0.1, 5.0]
+                opt_signal_variance = np.clip(optimized_params['signal_variance'], 0.1, 5.0)
+                set_gp_signal_variance(float(opt_signal_variance))
 
             if 'support_radius' in optimized_params:
                 # Clamp to slider bounds [0.5, 5.0]
@@ -2834,6 +3186,7 @@ def _(
             # Store optimized parameters for display in output cell
             opt_message = {
                 'lengthscale': float(opt_lengthscale) if opt_lengthscale is not None else None,
+                'signal_variance': float(opt_signal_variance) if opt_signal_variance is not None else None,
                 'support_radius': float(opt_support) if opt_support is not None else None,
                 'mean_reg': float(opt_mean_reg) if opt_mean_reg is not None else None,
                 'noise': float(opt_noise) if opt_noise is not None else None,
