@@ -8,6 +8,9 @@ on:
       - 'apps/**'
   workflow_dispatch:
 
+env:
+  UV_SYSTEM_PYTHON: 1  
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
