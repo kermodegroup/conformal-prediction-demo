@@ -18,19 +18,6 @@ import shutil
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
-
-# Dependencies that don't work in WASM
-WASM_INCOMPATIBLE_DEPS = {
-    'jax',
-    'jaxlib', 
-    'tensorflow',
-    'torch',
-    'pytorch',
-    'scikit-learn',
-    'sklearn',
-}
-
-
 # Mapping of lib/ modules to the cell patterns they should replace
 # Format: (module_name, cell_identifier_pattern, dependencies, return_names)
 LIB_CELL_MAPPINGS: List[Tuple[str, str, str, str]] = [
@@ -43,36 +30,6 @@ LIB_CELL_MAPPINGS: List[Tuple[str, str, str, str]] = [
     ("metrics", "def gaussian_log_likelihood_per_point", "np", None),  # Complex return
     ("basis", "def make_rbf_features", "np", "make_custom_features, make_fourier_features, make_lj_features, make_rbf_features"),
 ]
-
-
-def check_wasm_compatible(notebook_path: Path) -> Tuple[bool, List[str]]:
-    """
-    Check if a notebook's dependencies are WASM-compatible.
-    
-    Returns (is_compatible, list_of_incompatible_deps)
-    """
-    content = notebook_path.read_text()
-    
-    # Look for PEP 723 inline metadata
-    metadata_match = re.search(r'# /// script\n(.*?)# ///', content, re.DOTALL)
-    
-    incompatible_found = []
-    
-    if metadata_match:
-        metadata = metadata_match.group(1).lower()
-        for dep in WASM_INCOMPATIBLE_DEPS:
-            if dep in metadata:
-                incompatible_found.append(dep)
-    
-    # Also check imports in the code itself
-    for dep in WASM_INCOMPATIBLE_DEPS:
-        # Check for import statements
-        if re.search(rf'^\s*(import|from)\s+{dep}\b', content, re.MULTILINE):
-            if dep not in incompatible_found:
-                incompatible_found.append(dep)
-    
-    return (len(incompatible_found) == 0, incompatible_found)
-
 
 def extract_module_content(module_path: Path) -> str:
     """Extract the main content from a lib/ module (excluding module-level imports)."""
@@ -458,7 +415,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--skip-incompatible", action="store_true",
-        help="Skip notebooks with WASM-incompatible dependencies instead of failing"
+        help="Skip notebooks that fail to export instead of failing the build"
     )
     args = parser.parse_args()
 
@@ -472,8 +429,7 @@ def main() -> None:
         return
 
     all_notebooks: List[str] = []
-    skipped_notebooks: List[Tuple[str, List[str]]] = []
-    temp_files: List[Path] = []  # Track temp files for cleanup
+    temp_files: List[Path] = []
 
     for directory in ["notebooks", "apps"]:
         dir_path = Path(directory)
@@ -481,41 +437,27 @@ def main() -> None:
             print(f"Warning: Directory not found: {dir_path}")
             continue
 
-        # Collect notebooks, excluding lib/ subdirectory
         for path in dir_path.rglob("*.py"):
             if "lib" not in path.parts:
-                # Check WASM compatibility
-                is_compatible, incompatible_deps = check_wasm_compatible(path)
-                
-                if not is_compatible:
-                    if args.skip_incompatible:
-                        print(f"Skipping {path} - incompatible deps: {', '.join(incompatible_deps)}")
-                        skipped_notebooks.append((str(path), incompatible_deps))
-                        continue
-                    else:
-                        print(f"Warning: {path} has WASM-incompatible deps: {', '.join(incompatible_deps)}")
-                
                 all_notebooks.append(str(path))
 
     if not all_notebooks:
-        print("No compatible notebooks found!")
+        print("No notebooks found!")
         return
 
     try:
         successful_notebooks: List[str] = []
-        
-        # Export notebooks sequentially
+        failed_notebooks: List[str] = []
+
         for nb in all_notebooks:
             nb_path = Path(nb)
             lib_dir = nb_path.parent / "lib"
 
-            # Bundle with lib/ if it exists and sync is enabled
             if args.sync_lib and lib_dir.exists():
                 print(f"Bundling {nb} with lib/ modules...")
                 bundled_path = bundle_marimo_with_lib(nb_path, lib_dir)
-                temp_files.append(bundled_path.parent)  # Track temp dir for cleanup
+                temp_files.append(bundled_path.parent)
                 export_path = str(bundled_path)
-                # Use original path for output filename
                 output_name = nb
             else:
                 export_path = nb
@@ -527,30 +469,28 @@ def main() -> None:
                 as_app=nb.startswith("apps/"),
                 output_name=output_name
             )
-            
+
             if success:
                 successful_notebooks.append(nb)
-            elif args.skip_incompatible:
-                print(f"  Export failed, skipping {nb}")
-                skipped_notebooks.append((nb, ["export_failed"]))
+            else:
+                failed_notebooks.append(nb)
+                if not args.skip_incompatible:
+                    print(f"Export failed for {nb}, aborting")
+                    return
 
-        # Generate index only for successfully exported notebooks
         generate_index(successful_notebooks, args.output_dir)
-        
-        # Summary
-        if skipped_notebooks:
-            print(f"\n=== Build Summary ===")
-            print(f"Exported: {len(successful_notebooks)} notebooks")
-            print(f"Skipped: {len(skipped_notebooks)} notebooks")
-            for nb, reasons in skipped_notebooks:
-                print(f"  - {nb}: {', '.join(reasons)}")
+
+        print(f"\n=== Build Summary ===")
+        print(f"Exported: {len(successful_notebooks)} notebooks")
+        if failed_notebooks:
+            print(f"Failed: {len(failed_notebooks)} notebooks")
+            for nb in failed_notebooks:
+                print(f"  - {nb}")
 
     finally:
-        # Cleanup temp files
         for temp_dir in temp_files:
             if temp_dir.exists() and str(temp_dir).startswith(tempfile.gettempdir()):
                 shutil.rmtree(temp_dir, ignore_errors=True)
-
 
 if __name__ == "__main__":
     main()
