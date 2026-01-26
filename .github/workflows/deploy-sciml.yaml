@@ -26,3 +26,8 @@ jobs:
             -e "ssh -i ~/.ssh/deploy_key" \
             ./apps/ \
             ${{ secrets.MARIMO_DEPLOY_USER }}@${{ secrets.MARIMO_DEPLOY_HOST }}:/home/ubuntu/marimo-server/notebooks/
+
+      - name: Regenerate services
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.MARIMO_DEPLOY_USER }}@${{ secrets.MARIMO_DEPLOY_HOST }} \
+            '/home/ubuntu/marimo-server/deploy.sh'            
