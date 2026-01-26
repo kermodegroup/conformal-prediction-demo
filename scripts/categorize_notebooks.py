@@ -13,8 +13,6 @@ WASM_INCOMPATIBLE_DEPS = {
     'tensorflow',
     'torch',
     'pytorch',
-    'scikit-learn',
-    'sklearn',
 }
 
 
