@@ -57,10 +57,15 @@ jobs:
       - name: 📤 Deploy live notebooks
         run: |
           if [ -s live_notebooks.txt ]; then
+            # Copy live notebooks to a flat staging directory
+            mkdir -p _live_staging
+            while IFS= read -r f; do
+              [ -n "$f" ] && cp "$f" _live_staging/
+            done < live_notebooks.txt
+
             rsync -avz --delete \
               -e "ssh -i ~/.ssh/deploy_key" \
-              --files-from=live_notebooks.txt \
-              . \
+              _live_staging/ \
               ${{ secrets.MARIMO_DEPLOY_USER }}@${{ secrets.MARIMO_DEPLOY_HOST }}:/home/ubuntu/marimo-server/notebooks/
           else
             echo "No live notebooks to deploy"
