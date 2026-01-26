@@ -1,0 +1,69 @@
+name: Deploy to Warwick
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'notebooks/**'
+      - 'apps/**'
+  workflow_dispatch:
+
+env:
+  UV_SYSTEM_PYTHON: 1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🚀 Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+
+      - name: 📦 Install dependencies
+        run: uv pip install marimo
+
+      - name: 🔍 Categorize notebooks
+        run: python scripts/categorize_notebooks.py
+
+      - name: 🛠️ Export WASM notebooks
+        run: python scripts/build.py --sync-lib --skip-incompatible --output-dir _wasm_site
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.WARWICK_DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.WARWICK_DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: 📤 Deploy WASM notebooks
+        run: |
+          if [ -d "_wasm_site" ]; then
+            rsync -avz --delete \
+              -e "ssh -i ~/.ssh/deploy_key" \
+              ./_wasm_site/ \
+              ${{ secrets.WARWICK_DEPLOY_USER }}@${{ secrets.WARWICK_DEPLOY_HOST }}:~/marimo-server/wasm/
+          fi
+
+      - name: 📤 Deploy live notebooks (JAX only)
+        run: |
+          if [ -s live_notebooks.txt ]; then
+            rsync -avz --delete \
+              -e "ssh -i ~/.ssh/deploy_key" \
+              --files-from=live_notebooks.txt \
+              . \
+              ${{ secrets.WARWICK_DEPLOY_USER }}@${{ secrets.WARWICK_DEPLOY_HOST }}:~/marimo-server/notebooks/
+          else
+            echo "No live notebooks to deploy"
+          fi
+
+      - name: 🔄 Restart server
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            ${{ secrets.WARWICK_DEPLOY_USER }}@${{ secrets.WARWICK_DEPLOY_HOST }} \
+            '~/marimo-server/deploy.sh'
