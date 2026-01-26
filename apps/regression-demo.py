@@ -2,7 +2,6 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "marimo",
-#     "watchdog",
 #     "matplotlib==3.10.1",
 #     "numpy==2.2.5",
 #     "popsregression==0.3.5",
