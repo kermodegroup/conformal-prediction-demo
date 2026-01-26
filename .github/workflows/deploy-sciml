@@ -1,0 +1,28 @@
+name: Deploy Marimo Notebooks to sciml Server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/*.py'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.MARIMO_DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.MARIMO_DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy with rsync
+        run: |
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./apps/ \
+            ${{ secrets.MARIMO_DEPLOY_USER }}@${{ secrets.MARIMO_DEPLOY_HOST }}:/home/ubuntu/marimo-server/notebooks/
