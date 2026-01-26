@@ -1,0 +1,13 @@
+[project]
+name = "sciml-demos"
+version = "0.1.0"
+description = "Interactive SciML demonstrations using marimo notebooks"
+requires-python = ">=3.12"
+dependencies = [
+    "marimo>=0.19.6",  # Required for correct scipy.stats import handling in WASM
+]
+
+[project.optional-dependencies]
+dev = [
+    "uv",
+]
