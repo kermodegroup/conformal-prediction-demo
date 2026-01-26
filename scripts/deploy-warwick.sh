@@ -35,12 +35,12 @@ if [ "$WASM_COUNT" -gt 0 ]; then
     mkdir -p _wasm_site
 
     # Export each WASM-compatible notebook
-    while IFS= read -r notebook; do
+    # Note: || [ -n "$notebook" ] handles files without trailing newline
+    while IFS= read -r notebook || [ -n "$notebook" ]; do
         [ -z "$notebook" ] && continue
-        output_path="_wasm_site/${notebook%.py}.html"
-        mkdir -p "$(dirname "$output_path")"
-        echo "  Exporting: $notebook -> $output_path"
-        uv run marimo export html-wasm --mode run --no-show-code "$notebook" -o "$output_path"
+        output_file="${notebook%.py}.html"
+        echo "  Exporting: $notebook -> $output_file"
+        uv run marimo export html-wasm --mode run --no-show-code "$notebook" -o "_wasm_site/$output_file"
     done < wasm_notebooks.txt
 else
     echo "  No WASM notebooks to build"
