@@ -4,6 +4,8 @@ Interactive demonstrations of our research using [marimo](https://marimo.io) not
 
 **Live site:** https://sciml.jrkermode.uk
 
+This replaces the previous GitHub pages site at https://kermodegroup.github.io/demos
+
 ## Deployment Modes
 
 Notebooks are automatically deployed in one of two modes based on their dependencies:
