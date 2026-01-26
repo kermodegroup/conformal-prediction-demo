@@ -2,9 +2,7 @@
 
 Interactive demonstrations of our research using [marimo](https://marimo.io) notebooks.
 
-**Live site:** https://sciml.jrkermode.uk
-
-This replaces the previous GitHub pages site at https://kermodegroup.github.io/demos
+**Live site:** https://sciml.warwick.ac.uk
 
 ## Deployment Modes
 

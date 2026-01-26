@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repository contains interactive research demonstrations built with [marimo](https://marimo.io), a reactive Python notebook framework. Demos are deployed to https://sciml.jrkermode.uk with automatic WASM/live server selection based on dependencies.
+This repository contains interactive research demonstrations built with [marimo](https://marimo.io), a reactive Python notebook framework. Demos are deployed to https://sciml.warwick.ac.uk with automatic WASM/live server selection based on dependencies.
 
 ## Repository Structure
 
@@ -97,7 +97,7 @@ The GitHub Actions workflow (`.github/workflows/deploy.yml`):
 
 ## Server Infrastructure
 
-**Target server:** sciml.jrkermode.uk
+**Target server:** sciml.warwick.ac.uk
 
 ```
 /home/ubuntu/marimo-server/
