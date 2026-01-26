@@ -52,7 +52,7 @@ jobs:
           rsync -avz --delete \
             -e "ssh -i ~/.ssh/deploy_key" \
             ./_wasm_site/ \
-            ${{ secrets.MARIMO_DEPLOY_USER }}@${{ secrets.MARIMO_DEPLOY_HOST }}:/home/ubuntu/marimo-server/wasm/
+            ${{ secrets.MARIMO_DEPLOY_USER }}@${{ secrets.MARIMO_DEPLOY_HOST }}:/var/www/marimo-wasm/
 
       - name: 📤 Deploy live notebooks
         run: |
