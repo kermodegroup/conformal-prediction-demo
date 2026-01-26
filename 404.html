@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Redirecting to SciML Notebooks...</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      margin: 0;
+      background: #f5f5f5;
+    }
+    .container {
+      text-align: center;
+      padding: 2rem;
+    }
+    a {
+      color: #0066cc;
+    }
+  </style>
+  <script>
+    (function() {
+      // Map old GitHub Pages paths to new sciml.jrkermode.uk paths
+      var path = window.location.pathname;
+      var newUrl = 'https://sciml.jrkermode.uk/';
+
+      // /demos/apps/foo.html -> /wasm/apps/foo.html
+      if (path.includes('/apps/')) {
+        newUrl = 'https://sciml.jrkermode.uk/wasm' + path.replace('/demos', '');
+      }
+      // /demos/notebooks/foo -> /foo/ (live notebooks)
+      else if (path.includes('/notebooks/')) {
+        var notebook = path.split('/').pop().replace('.html', '').replace('.py', '');
+        newUrl = 'https://sciml.jrkermode.uk/' + notebook + '/';
+      }
+
+      window.location.replace(newUrl);
+    })();
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h1>SciML Notebooks has moved!</h1>
+    <p>Redirecting to <a href="https://sciml.jrkermode.uk/">sciml.jrkermode.uk</a>...</p>
+    <p><small>If you are not redirected automatically, <a href="https://sciml.jrkermode.uk/">click here</a>.</small></p>
+  </div>
+</body>
+</html>
