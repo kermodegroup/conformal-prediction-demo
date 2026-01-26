@@ -4,87 +4,166 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repository contains interactive research demonstrations built with [marimo](https://marimo.io), a reactive Python notebook framework. Demos are deployed to GitHub Pages at https://kermodegroup.github.io/demos
+This repository contains interactive research demonstrations built with [marimo](https://marimo.io), a reactive Python notebook framework. Demos are deployed to https://sciml.jrkermode.uk with automatic WASM/live server selection based on dependencies.
 
 ## Repository Structure
 
-- `apps/` - Marimo applications (exported in "run" mode, code hidden)
-- `apps/lib/` - Refactored library modules (for local development and testing)
-- `notebooks/` - Marimo notebooks (exported in "edit" mode, code visible) - currently empty
-- `scripts/build.py` - Build script that exports notebooks to HTML-WASM
+```
+demos/
+├── apps/                    # WASM-compatible notebooks (static HTML export)
+│   └── lib/                 # Shared library modules
+├── notebooks/               # Live server notebooks (require native deps)
+├── scripts/
+│   ├── build.py             # WASM HTML export script
+│   ├── categorize_notebooks.py  # WASM vs live detection
+│   └── deploy.sh            # Server deployment (systemd + nginx)
+├── .github/workflows/
+│   └── deploy.yml           # CI/CD pipeline
+├── 404.html                 # GitHub Pages redirect
+└── index.html               # GitHub Pages redirect
+```
+
+## Deployment Architecture
+
+### Dual Deployment Modes
+
+Notebooks are automatically categorized and deployed in one of two modes:
+
+1. **WASM (Static)** - Notebooks in `apps/` with pure Python dependencies
+   - Exported to HTML+WASM via `marimo export html-wasm`
+   - Served as static files from `/var/www/marimo-wasm/`
+   - No authentication required
+   - Runs entirely in browser via Pyodide
+
+2. **Live (Server)** - Notebooks in `notebooks/` with native dependencies
+   - Each notebook runs as a separate marimo process
+   - Managed by systemd services (port 2718+)
+   - Proxied through nginx with WebSocket support
+   - Protected by basic auth
+
+### WASM Incompatible Packages
+
+The `scripts/categorize_notebooks.py` detects these packages and routes to live:
+- ML frameworks: `jax`, `torch`, `tensorflow`
+- File system: `watchdog`, `psutil`
+- Database drivers: `psycopg2`, `mysqlclient`
+- Native extensions: `opencv-python`, `cryptography`, `grpcio`, `pyarrow`, etc.
 
 ## Commands
 
-### Run a demo locally
+### Local Development
+
 ```bash
+# Run a notebook locally
 marimo run apps/regression-demo.py
+marimo edit notebooks/jax-test.py
+
+# Test WASM compatibility detection
+python scripts/categorize_notebooks.py --offline
+
+# Build WASM notebooks locally
+python scripts/build.py --sync-lib --output-dir _wasm_site
 ```
 
-### Edit a demo locally (opens in browser with live reload)
+### Server Deployment
+
 ```bash
-marimo edit apps/regression-demo.py
+# On the server: regenerate systemd services and nginx config
+./scripts/deploy.sh
 ```
 
-### Build all demos for deployment
-```bash
-python scripts/build.py
+The deploy script:
+- Creates systemd services for each live notebook
+- Generates nginx reverse proxy config with SSL
+- Serves WASM notebooks without auth (required for JS fetch)
+- Auto-generates index page listing all notebooks
+- Cleans up services for removed notebooks
+
+## CI/CD Pipeline
+
+The GitHub Actions workflow (`.github/workflows/deploy.yml`):
+
+1. **Categorize** - `categorize_notebooks.py` sorts into WASM vs live lists
+2. **Build WASM** - `build.py` exports WASM notebooks to `_wasm_site/`
+3. **Deploy WASM** - rsync to `/var/www/marimo-wasm/` on server
+4. **Deploy Live** - rsync notebooks to `/home/ubuntu/marimo-server/notebooks/`
+5. **Regenerate** - runs `deploy.sh` to update systemd/nginx
+
+### Required Secrets
+
+- `MARIMO_DEPLOY_KEY` - SSH private key for deployment
+- `MARIMO_DEPLOY_HOST` - Server hostname
+- `MARIMO_DEPLOY_USER` - SSH username (typically `ubuntu`)
+
+## Server Infrastructure
+
+**Target server:** sciml.jrkermode.uk
+
 ```
-Output goes to `_site/` directory.
+/home/ubuntu/marimo-server/
+├── app.py           # FastAPI entry point (alternative to systemd)
+├── deploy.sh        # Deployment script (symlink to scripts/deploy.sh)
+├── notebooks/       # Live notebook .py files
+└── .venv/           # Python environment with marimo + deps
 
-### Build with lib/ sync check
-```bash
-python scripts/build.py --sync-lib
-```
-Bundles lib/ modules with marimo files and checks sync status before export.
-
-### Check lib/ sync status only (no build)
-```bash
-python scripts/build.py --check-sync
+/var/www/marimo-wasm/
+└── apps/            # WASM HTML files + assets
 ```
 
-## Architecture
+**Services:**
+- nginx: SSL termination, basic auth, reverse proxy
+- systemd: `marimo-{notebook-name}.service` per live notebook
+- Let's Encrypt: SSL certificates
 
-- **Marimo apps** use inline script dependencies (PEP 723 format) at the top of each `.py` file - no separate requirements.txt
-- **Build process** exports each `.py` file to standalone HTML-WASM:
-  - Files in `apps/` are exported with `--mode run --no-show-code` (app mode)
-  - Files in `notebooks/` are exported with `--mode edit` (notebook mode)
-- **Deployment** is automatic via GitHub Actions on push to main
+## Migration Checklist
 
-## Refactored Library Modules (`apps/lib/`)
+When migrating to a new server:
 
-The `apps/lib/` directory contains refactored, modular versions of the regression demo code. These modules are the canonical source for the ML/scientific logic and can be used for:
-- Unit testing
-- Reuse in other demos
-- Cleaner development workflow
+1. **Server setup:**
+   - Install Python 3.12+, nginx, certbot
+   - Create `/home/ubuntu/marimo-server/` directory
+   - Create Python venv with `uv`: `uv venv && uv pip install marimo jax jaxlib`
+   - Create `/var/www/marimo-wasm/` with correct permissions
 
-### Module Overview
+2. **SSL & Auth:**
+   - Run `certbot --nginx -d yourdomain.com`
+   - Create `/etc/nginx/.htpasswd` with `htpasswd -c /etc/nginx/.htpasswd username`
+
+3. **Deploy script:**
+   - Update `DOMAIN` variable in `scripts/deploy.sh`
+   - Update paths if different from `/home/ubuntu/marimo-server/`
+   - Symlink or copy to server
+
+4. **GitHub secrets:**
+   - Update `MARIMO_DEPLOY_HOST` to new domain/IP
+   - Generate new SSH key pair, add public key to server's `~/.ssh/authorized_keys`
+   - Update `MARIMO_DEPLOY_KEY` with new private key
+
+5. **DNS:**
+   - Point domain to new server IP
+
+6. **GitHub Pages redirects:**
+   - Update URLs in `404.html` and `index.html` if domain changes
+
+## Marimo Notebook Conventions
+
+- Include dependencies in PEP 723 script metadata at top of file
+- Avoid `watchdog` and other dev-only deps that break WASM
+- Use `mo.ui.*` for interactive elements
+- Last expression in cell is auto-displayed
+- For matplotlib: use `plt.gca()` not `plt.show()`
+
+## Library Modules (`apps/lib/`)
+
+Shared code for regression demos:
 
 | Module | Description |
 |--------|-------------|
 | `models.py` | `MyBayesianRidge`, `ConformalPrediction`, `NeuralNetworkRegression`, `QuantileRegressionUQ` |
-| `kernels.py` | GP kernels (RBF, Matérn, bump, polynomial) and prediction functions |
-| `basis.py` | Basis feature functions (RBF, Fourier, LJ, custom) |
+| `kernels.py` | GP kernels (RBF, Matérn, bump, polynomial) |
+| `basis.py` | Basis feature functions (RBF, Fourier, LJ) |
 | `metrics.py` | Probabilistic metrics (log likelihood, CRPS) |
 | `data.py` | Ground truth functions and data generation |
 | `optimization.py` | GP hyperparameter optimization |
 
-### WASM Export and Sync Workflow
-
-The marimo WASM export bundles only a single `.py` file. The `regression-demo.py` contains inline copies of the lib/ code for WASM compatibility.
-
-**When modifying core logic:**
-1. Update the lib/ module first (source of truth)
-2. Run `python scripts/build.py --check-sync` to verify sync status
-3. Manually sync changes to inline definitions in `regression-demo.py`
-4. The CI build uses `--sync-lib` to validate sync before export
-
-**Build script options:**
-- `--sync-lib`: Bundles lib/ with marimo files, warns if out of sync
-- `--check-sync`: Quick sync status check without building
-
-### Example: Using lib/ locally
-
-```python
-from lib import MyBayesianRidge, fit_gp_numpy, crps_gaussian
-from lib import ground_truth, make_rbf_features
-```
+**Sync workflow:** When modifying lib/, run `--check-sync` to verify inline copies in notebooks match.
