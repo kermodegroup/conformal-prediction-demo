@@ -28,9 +28,11 @@
       var path = window.location.pathname;
       var newUrl = 'https://sciml.warwick.ac.uk/';
 
-      // /demos/apps/foo.html -> /wasm/apps/foo.html
+      // /demos/apps/foo.html -> /foo.html (WASM notebooks)
       if (path.includes('/apps/')) {
-        newUrl = 'https://sciml.warwick.ac.uk/wasm' + path.replace('/demos', '');
+        var notebook = path.split('/').pop().replace('.py', '');
+        if (!notebook.endsWith('.html')) notebook += '.html';
+        newUrl = 'https://sciml.warwick.ac.uk/' + notebook;
       }
       // /demos/notebooks/foo -> /foo/ (live notebooks)
       else if (path.includes('/notebooks/')) {

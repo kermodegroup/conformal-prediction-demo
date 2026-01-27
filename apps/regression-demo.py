@@ -1432,7 +1432,7 @@ def _():
 
     # Generate QR code
     qr = qrcode.QRCode(version=1, box_size=10, border=4)
-    qr.add_data('https://kermodegroup.github.io/demos')
+    qr.add_data('https://sciml.warwick.ac.uk/regression-demo.html')
     qr.make(fit=True)
 
     img = qr.make_image(fill_color="black", back_color="white")
@@ -1453,7 +1453,7 @@ def _(mo, qr_base64):
             <div>
                 <p style='font-size: 24px; margin: 0; padding: 0; line-height: 1.3;'><b>Bayesian Regression and UQ Demo</b>
                 <br><span style="font-size: 16px;"><i>Live demo:</i>
-                <a href="https://kermodegroup.github.io/demos" target="_blank" style="color: #0066cc; text-decoration: none;">kermodegroup.github.io/demos</a>
+                <a href="https://sciml.warwick.ac.uk/regression-demo.html" target="_blank" style="color: #0066cc; text-decoration: none;">sciml.warwick.ac.uk</a>
                 &nbsp;&nbsp;|&nbsp;&nbsp;
                 <i>Code:</i>
                 <a href="https://github.com/kermodegroup/demos" target="_blank" style="color: #0066cc; text-decoration: none;">github.com/kermodegroup/demos</a>
