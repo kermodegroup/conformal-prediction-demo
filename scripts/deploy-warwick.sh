@@ -34,13 +34,14 @@ if [ "$WASM_COUNT" -gt 0 ]; then
     rm -rf _wasm_site
     mkdir -p _wasm_site
 
-    # Export each WASM-compatible notebook
+    # Export each WASM-compatible notebook (flat structure - just basename)
     # Note: || [ -n "$notebook" ] handles files without trailing newline
     while IFS= read -r notebook || [ -n "$notebook" ]; do
         [ -z "$notebook" ] && continue
-        output_file="${notebook%.py}.html"
-        echo "  Exporting: $notebook -> $output_file"
-        uv run marimo export html-wasm --mode run --no-show-code "$notebook" -o "_wasm_site/$output_file"
+        # Use just the basename for flat URL structure
+        basename=$(basename "$notebook" .py)
+        echo "  Exporting: $notebook -> ${basename}.html"
+        uv run marimo export html-wasm --mode run --no-show-code "$notebook" -o "_wasm_site/${basename}.html"
     done < wasm_notebooks.txt
 else
     echo "  No WASM notebooks to build"
@@ -54,10 +55,17 @@ else
     echo "  No WASM notebooks to deploy"
 fi
 
-# Deploy live notebooks (JAX-dependent)
+# Deploy live notebooks (JAX-dependent) - flatten to just basenames
 echo -e "\n${YELLOW}Deploying live notebooks...${NC}"
 if [ -s live_notebooks.txt ]; then
-    rsync -avz --delete --files-from=live_notebooks.txt . ${REMOTE}:~/marimo-server/notebooks/
+    # Clear existing notebooks first
+    ssh ${REMOTE} 'rm -f ~/marimo-server/notebooks/*.py'
+    # Copy each notebook with flat structure
+    while IFS= read -r notebook || [ -n "$notebook" ]; do
+        [ -z "$notebook" ] && continue
+        echo "  Deploying: $notebook"
+        scp "$notebook" ${REMOTE}:~/marimo-server/notebooks/
+    done < live_notebooks.txt
 else
     echo "  No live notebooks to deploy"
     # Clear remote notebooks directory if no live notebooks
