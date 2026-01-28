@@ -16,9 +16,8 @@ demos/
 ├── scripts/
 │   ├── build.py             # WASM HTML export script
 │   ├── categorize_notebooks.py  # WASM vs live detection
-│   └── deploy.sh            # Server deployment (systemd + nginx)
-├── .github/workflows/
-│   └── deploy.yml           # CI/CD pipeline
+│   ├── deploy.sh            # Server-side deployment (systemd + nginx)
+│   └── deploy-warwick.sh    # Local deployment script (requires 2FA)
 ├── 404.html                 # GitHub Pages redirect
 └── index.html               # GitHub Pages redirect
 ```
@@ -65,35 +64,21 @@ python scripts/categorize_notebooks.py --offline
 python scripts/build.py --sync-lib --output-dir _wasm_site
 ```
 
-### Server Deployment
+### Deployment
+
+Deployment requires 2FA authentication to the university server, so it must be done locally:
 
 ```bash
-# On the server: regenerate systemd services and nginx config
-./scripts/deploy.sh
+# Deploy from local machine (builds WASM, rsyncs, restarts services)
+./scripts/deploy-warwick.sh
 ```
 
 The deploy script:
-- Creates systemd services for each live notebook
-- Generates nginx reverse proxy config with SSL
-- Serves WASM notebooks without auth (required for JS fetch)
-- Auto-generates index page listing all notebooks
-- Cleans up services for removed notebooks
-
-## CI/CD Pipeline
-
-The GitHub Actions workflow (`.github/workflows/deploy.yml`):
-
-1. **Categorize** - `categorize_notebooks.py` sorts into WASM vs live lists
-2. **Build WASM** - `build.py` exports WASM notebooks to `_wasm_site/`
-3. **Deploy WASM** - rsync to `/var/www/marimo-wasm/` on server
-4. **Deploy Live** - rsync notebooks to `/home/ubuntu/marimo-server/notebooks/`
-5. **Regenerate** - runs `deploy.sh` to update systemd/nginx
-
-### Required Secrets
-
-- `MARIMO_DEPLOY_KEY` - SSH private key for deployment
-- `MARIMO_DEPLOY_HOST` - Server hostname
-- `MARIMO_DEPLOY_USER` - SSH username (typically `ubuntu`)
+1. Categorizes notebooks into WASM vs live
+2. Builds WASM notebooks to `_wasm_site/`
+3. Rsyncs WASM files to `/var/www/marimo-wasm/` on server
+4. Rsyncs live notebooks to `/home/svc_user/marimo-server/notebooks/`
+5. Restarts marimo service on server
 
 ## Server Infrastructure
 
@@ -121,7 +106,7 @@ When migrating to a new server:
 
 1. **Server setup:**
    - Install Python 3.12+, nginx, certbot
-   - Create `/home/ubuntu/marimo-server/` directory
+   - Create marimo server directory
    - Create Python venv with `uv`: `uv venv && uv pip install marimo jax jaxlib`
    - Create `/var/www/marimo-wasm/` with correct permissions
 
@@ -131,18 +116,13 @@ When migrating to a new server:
 
 3. **Deploy script:**
    - Update `DOMAIN` variable in `scripts/deploy.sh`
-   - Update paths if different from `/home/ubuntu/marimo-server/`
-   - Symlink or copy to server
+   - Update paths in `scripts/deploy-warwick.sh`
+   - Symlink or copy deploy.sh to server
 
-4. **GitHub secrets:**
-   - Update `MARIMO_DEPLOY_HOST` to new domain/IP
-   - Generate new SSH key pair, add public key to server's `~/.ssh/authorized_keys`
-   - Update `MARIMO_DEPLOY_KEY` with new private key
-
-5. **DNS:**
+4. **DNS:**
    - Point domain to new server IP
 
-6. **GitHub Pages redirects:**
+5. **GitHub Pages redirects:**
    - Update URLs in `404.html` and `index.html` if domain changes
 
 ## Marimo Notebook Conventions

@@ -34,7 +34,7 @@ Notebooks are automatically deployed in one of two modes based on their dependen
    # ]
    # ///
    ```
-3. Push to `main` - CI/CD will automatically categorize and deploy
+3. Deploy via `./scripts/deploy-warwick.sh` (requires 2FA)
 
 ## Automatic Categorization
 
