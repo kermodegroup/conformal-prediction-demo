@@ -2714,7 +2714,7 @@ def _(
 def _(metrics_dict, mo):
     # Generate and display metrics table in an accordion
     if not metrics_dict:
-        mo.accordion({"Performance Metrics": mo.md("*No metrics available. Enable a regression method.*")})
+        metrics_accordion = mo.accordion({"Performance Metrics": mo.md("*No metrics available. Enable a regression method.*")})
     else:
         # Compute best/worst for each metric (for coloring)
         # Higher is better: coverage, log_likelihood, loo_log_lik
@@ -2802,7 +2802,8 @@ def _(metrics_dict, mo):
             </tbody>
         </table>
         ''')
-        mo.accordion({"Performance Metrics": metrics_table})
+        metrics_accordion = mo.accordion({"Performance Metrics": metrics_table})
+    metrics_accordion
     return
 
 
