@@ -1,0 +1,30 @@
+# Demo configuration - controls index page display
+# Order determines display order; title overrides auto-generated name
+
+[[demos]]
+name = "probability-demo"
+title = "Probability Distributions"
+
+[[demos]]
+name = "basis-demo"
+title = "Basis Function Explorer"
+
+[[demos]]
+name = "regression-demo"
+title = "Bayesian Regression and UQ"
+
+[[demos]]
+name = "kernel-demo"
+title = "Kernel Explorer"
+
+[[demos]]
+name = "gp-demo"
+title = "GP Regression"
+
+[[demos]]
+name = "clustering-demo"
+title = "K-Means and GMM Clustering"
+
+[[demos]]
+name = "mlp-demo"
+title = "MLP Regression"

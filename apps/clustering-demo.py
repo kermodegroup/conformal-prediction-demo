@@ -43,7 +43,17 @@ def _(mo):
         }
 
         .app-plot {
-            flex-shrink: 0;
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+        }
+
+        .app-plot img,
+        .app-plot svg {
+            max-width: 100%;
+            height: auto;
         }
 
         .app-sidebar {
@@ -58,11 +68,15 @@ def _(mo):
         }
 
         .app-sidebar h4 {
-            margin: 0 0 0.5em 0;
+            margin: 1em 0 0.5em 0;
             font-size: 0.9em;
             color: #495057;
             border-bottom: 1px solid #dee2e6;
             padding-bottom: 0.3em;
+        }
+
+        .app-sidebar h4:first-child {
+            margin-top: 0;
         }
     </style>
     ''')
@@ -112,8 +126,8 @@ def _(mo, qr_base64):
         <div style="display: flex; justify-content: space-between; align-items: center; margin: 0; padding: 0;">
             <div>
                 <p style='font-size: 24px; margin: 0; padding: 0; line-height: 1.3;'><b>K-Means and GMM Clustering Demo</b>
-                <br><span style="font-size: 16px;"><i>Live demo:</i>
-                <a href="https://sciml.warwick.ac.uk/clustering-demo.html" target="_blank" style="color: #0066cc; text-decoration: none;">sciml.warwick.ac.uk</a>
+                <br><span style="font-size: 16px;"><i>Live demos:</i>
+                <a href="https://sciml.warwick.ac.uk/" target="_blank" style="color: #0066cc; text-decoration: none;">sciml.warwick.ac.uk</a>
                 &nbsp;&nbsp;|&nbsp;&nbsp;
                 <i>Code:</i>
                 <a href="https://github.com/kermodegroup/demos" target="_blank" style="color: #0066cc; text-decoration: none;">github.com/kermodegroup/demos</a>
