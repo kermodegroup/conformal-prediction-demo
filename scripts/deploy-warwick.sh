@@ -55,6 +55,16 @@ else
     echo "  No WASM notebooks to deploy"
 fi
 
+# Sync server venv with pyproject.toml
+echo -e "\n${YELLOW}Syncing server dependencies...${NC}"
+scp pyproject.toml ${REMOTE}:~/marimo-server/
+ssh ${REMOTE} 'cd ~/marimo-server && uv sync --extra jax --extra server'
+
+# Deploy demos.toml config and app.py
+echo -e "\n${YELLOW}Deploying server config...${NC}"
+scp demos.toml ${REMOTE}:~/marimo-server/
+scp server/app.py ${REMOTE}:~/marimo-server/
+
 # Deploy live notebooks (JAX-dependent) - flatten to just basenames
 echo -e "\n${YELLOW}Deploying live notebooks...${NC}"
 if [ -s live_notebooks.txt ]; then

@@ -1,4 +1,5 @@
 import marimo
+import tomllib
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, FileResponse
@@ -7,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 NOTEBOOKS_DIR = Path(__file__).parent / "notebooks"
 WASM_DIR = Path(__file__).parent / "wasm"
+CONFIG_FILE = Path(__file__).parent / "demos.toml"
 
 app = FastAPI()
 
@@ -34,6 +36,17 @@ if WASM_DIR.exists():
         if html_file.name != "index.html":
             wasm_notebooks.append(html_file.stem)
 
+# Load demo config
+demo_config = []
+if CONFIG_FILE.exists():
+    with open(CONFIG_FILE, "rb") as f:
+        config = tomllib.load(f)
+        demo_config = config.get("demos", [])
+
+# Build config lookup
+config_by_name = {d["name"]: d for d in demo_config}
+config_order = [d["name"] for d in demo_config]
+
 # Serve WASM assets at /assets/
 if WASM_DIR.exists() and (WASM_DIR / "assets").exists():
     app.mount("/assets", StaticFiles(directory=str(WASM_DIR / "assets")), name="assets")
@@ -42,17 +55,33 @@ if WASM_DIR.exists() and (WASM_DIR / "assets").exists():
 if WASM_DIR.exists() and (WASM_DIR / "files").exists():
     app.mount("/files", StaticFiles(directory=str(WASM_DIR / "files")), name="files")
 
+def get_display_title(name):
+    """Get display title from config or auto-generate."""
+    if name in config_by_name:
+        return config_by_name[name].get("title", name.replace("-", " ").replace("_", " ").title())
+    return name.replace("-", " ").replace("_", " ").title()
+
+def get_sort_key(name):
+    """Get sort key - config order first, then alphabetical."""
+    if name in config_order:
+        return (0, config_order.index(name))
+    return (1, name)
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     all_notebooks = []
     for name in live_notebooks:
-        all_notebooks.append((name, f"/{name}/", "live"))
+        if name not in config_by_name or not config_by_name[name].get("hidden", False):
+            all_notebooks.append((name, f"/{name}/", "live"))
     for name in wasm_notebooks:
-        all_notebooks.append((name, f"/{name}.html", "wasm"))
-    all_notebooks.sort(key=lambda x: x[0])
+        if name not in config_by_name or not config_by_name[name].get("hidden", False):
+            all_notebooks.append((name, f"/{name}.html", "wasm"))
+
+    # Sort by config order, then alphabetically
+    all_notebooks.sort(key=lambda x: get_sort_key(x[0]))
 
     notebook_links = "".join(
-        f'<li><a href="{url}">{name.replace("-", " ").replace("_", " ").title()}</a>'
+        f'<li><a href="{url}">{get_display_title(name)}</a>'
         f'<span class="badge {badge_type}">{badge_type.upper()}</span></li>'
         for name, url, badge_type in all_notebooks
     )
