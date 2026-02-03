@@ -20,7 +20,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create marimo server for live notebooks
+# Create marimo server for live notebooks (mounted at /live)
 server = marimo.create_asgi_app()
 live_notebooks = []
 for notebook in sorted(NOTEBOOKS_DIR.glob("*.py")):
@@ -67,10 +67,10 @@ def get_sort_key(name):
 def index():
     all_notebooks = []
 
-    # Add live notebooks (served by this server)
+    # Add live notebooks (served at /live, SSO protected)
     for name in live_notebooks:
         if name not in config_by_name or not config_by_name[name].get("hidden", False):
-            all_notebooks.append((name, f"/{name}/", "live"))
+            all_notebooks.append((name, f"/live/{name}/", "live"))
 
     # Add WASM notebooks (link to GitHub Pages)
     for name in wasm_notebooks:
@@ -121,8 +121,8 @@ def index():
     """
 
 
-# Mount marimo server (for live notebooks)
-app.mount("/", server.build())
+# Mount marimo server at /live (SSO protected path)
+app.mount("/live", server.build())
 
 if __name__ == "__main__":
     import uvicorn
