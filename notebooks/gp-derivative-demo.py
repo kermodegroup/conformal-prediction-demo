@@ -549,12 +549,19 @@ def _(
             )
 
             # Build tangent data centered at posterior mean
+            # Adjust for aspect ratio so tangent VISUALLY shows correct slope
+            # Plot aspect: x_range=2.4, y_range=8, ratio=3.33
+            aspect_ratio = (y_max - y_min) / (x_max - x_min)
             tangent_f_data = []
             for i, (x, slope) in enumerate(deriv_obs):
                 y_center = float(f_at_deriv[i])
+                # Scale y-displacement by aspect ratio for visual correctness
+                y_disp = tangent_length * slope * aspect_ratio
+                # Clamp to keep tangent visible within plot bounds
+                y_disp = np.clip(y_disp, -2.0, 2.0)
                 tangent_f_data.append({
-                    'x1': x - tangent_length, 'y1': y_center - tangent_length * slope,
-                    'x2': x + tangent_length, 'y2': y_center + tangent_length * slope,
+                    'x1': x - tangent_length, 'y1': y_center - y_disp,
+                    'x2': x + tangent_length, 'y2': y_center + y_disp,
                 })
             tangent_f_df = pd.DataFrame(tangent_f_data)
 
