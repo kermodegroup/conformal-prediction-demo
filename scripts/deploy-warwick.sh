@@ -10,13 +10,14 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}=== SciML Deployment ===${NC}"
+echo -e "${GREEN}=== SciML Live Notebooks Deployment ===${NC}"
+echo -e "WASM notebooks are deployed via GitHub Pages (kermodegroup.github.io/demos)"
 
 # Change to demos directory
 cd "$DEMOS_DIR"
 echo "Working directory: $(pwd)"
 
-# Categorize notebooks by WASM compatibility
+# Categorize notebooks to identify live notebooks
 echo -e "\n${YELLOW}Categorizing notebooks...${NC}"
 uv run python scripts/categorize_notebooks.py --output-wasm wasm_notebooks.txt --output-live live_notebooks.txt
 
@@ -24,36 +25,8 @@ uv run python scripts/categorize_notebooks.py --output-wasm wasm_notebooks.txt -
 echo -e "\n${YELLOW}Deployment summary:${NC}"
 WASM_COUNT=$(cat wasm_notebooks.txt 2>/dev/null | grep -c . || echo 0)
 LIVE_COUNT=$(cat live_notebooks.txt 2>/dev/null | grep -c . || echo 0)
-echo "  WASM notebooks: $WASM_COUNT"
-echo "  Live notebooks: $LIVE_COUNT"
-
-# Build WASM notebooks
-echo -e "\n${YELLOW}Building WASM notebooks...${NC}"
-if [ "$WASM_COUNT" -gt 0 ]; then
-    # Clean and recreate output directory
-    rm -rf _wasm_site
-    mkdir -p _wasm_site
-
-    # Export each WASM-compatible notebook (flat structure - just basename)
-    # Note: || [ -n "$notebook" ] handles files without trailing newline
-    while IFS= read -r notebook || [ -n "$notebook" ]; do
-        [ -z "$notebook" ] && continue
-        # Use just the basename for flat URL structure
-        basename=$(basename "$notebook" .py)
-        echo "  Exporting: $notebook -> ${basename}.html"
-        uv run marimo export html-wasm --mode run --no-show-code "$notebook" -o "_wasm_site/${basename}.html"
-    done < wasm_notebooks.txt
-else
-    echo "  No WASM notebooks to build"
-fi
-
-# Deploy WASM notebooks
-echo -e "\n${YELLOW}Deploying WASM notebooks...${NC}"
-if [ -d "_wasm_site" ] && [ "$WASM_COUNT" -gt 0 ]; then
-    rsync -avz --delete _wasm_site/ ${REMOTE}:~/marimo-server/wasm/
-else
-    echo "  No WASM notebooks to deploy"
-fi
+echo "  WASM notebooks (GitHub Pages): $WASM_COUNT"
+echo "  Live notebooks (this server):  $LIVE_COUNT"
 
 # Sync server venv with pyproject.toml
 echo -e "\n${YELLOW}Syncing server dependencies...${NC}"
@@ -90,4 +63,5 @@ ssh ${REMOTE} '~/marimo-server/deploy.sh'
 rm -f wasm_notebooks.txt live_notebooks.txt
 
 echo -e "\n${GREEN}=== Deployment complete ===${NC}"
-echo "Visit: https://sciml.warwick.ac.uk/"
+echo "Live notebooks: https://sciml.warwick.ac.uk/"
+echo "WASM notebooks: https://kermodegroup.github.io/demos/"

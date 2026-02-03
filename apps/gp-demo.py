@@ -2,10 +2,11 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "marimo",
-#     "matplotlib==3.10.1",
+#     "altair",
+#     "pandas",
 #     "numpy==2.2.5",
 #     "scipy",
-#     "seaborn==0.13.2",
+#     "pillow",
 #     "qrcode==8.2",
 # ]
 # ///
@@ -46,14 +47,24 @@ def _(mo):
             flex: 1;
             min-width: 0;
             display: flex;
-            justify-content: center;
-            align-items: flex-start;
+            flex-direction: column;
+            justify-content: flex-start;
+            align-items: stretch;
+            z-index: 1;
+            overflow: hidden;
         }
 
         .app-plot img,
         .app-plot svg {
             max-width: 100%;
             height: auto;
+        }
+
+        .app-sidebar-container {
+            z-index: 10;
+            position: relative;
+            flex-shrink: 0;
+            width: 300px;
         }
 
         .app-sidebar {
@@ -64,7 +75,25 @@ def _(mo):
             background-color: #f8f9fa;
             border-radius: 8px;
             border: 1px solid #dee2e6;
-            min-width: 280px;
+            width: 100%;
+        }
+
+        @media (max-width: 768px) {
+            .app-layout {
+                flex-direction: column;
+                height: auto;
+                overflow-y: auto;
+            }
+            .app-plot {
+                max-width: 100%;
+                width: 100%;
+            }
+            .app-sidebar-container {
+                width: 100%;
+            }
+            .app-sidebar {
+                width: 100%;
+            }
         }
 
         .app-sidebar h4 {
@@ -87,13 +116,12 @@ def _(mo):
 def _():
     import marimo as mo
     import numpy as np
-    import matplotlib.pyplot as plt
+    import pandas as pd
+    import altair as alt
     import scipy.linalg as sla
     import scipy.optimize as opt
 
-    import seaborn as sns
-    sns.set_context('talk')
-    return mo, np, plt, sla, opt, sns
+    return alt, mo, np, opt, pd, sla
 
 
 @app.cell(hide_code=True)
@@ -104,7 +132,7 @@ def _():
 
     # Generate QR code
     qr = qrcode.QRCode(version=1, box_size=10, border=4)
-    qr.add_data('https://sciml.warwick.ac.uk/gp-demo.html')
+    qr.add_data('https://kermodegroup.github.io/demos/gp-demo.html')
     qr.make(fit=True)
 
     img = qr.make_image(fill_color="black", back_color="white")
@@ -168,9 +196,12 @@ def _(mo):
     lengthscale_slider = mo.ui.slider(0.05, 1.0, 0.05, 0.3, label='Lengthscale $\\ell$')
 
     # Data parameters - start at 0 so posterior matches prior
-    n_data_slider = mo.ui.slider(0, 50, 1, 0, label='$N$ data points')
+    n_data_slider = mo.ui.slider(0, 50, 1, 0, label='$N$ random data points')
     noise_slider = mo.ui.slider(0.01, 0.5, 0.01, 0.2, label='Noise $\\sigma_n$')
     seed_slider = mo.ui.slider(0, 100, 1, 42, label='Random seed')
+
+    # Click uncertainty slider - controls error bar size for clicked points
+    click_uncertainty_slider = mo.ui.slider(0.05, 1.0, 0.05, 0.2, label='Data error $\\sigma_c$')
 
     # Sampling controls
     n_samples_slider = mo.ui.slider(0, 30, 1, 5, label='$N$ samples')
@@ -183,29 +214,25 @@ def _(mo):
         n_data_slider,
         noise_slider,
         seed_slider,
+        click_uncertainty_slider,
         n_samples_slider,
     )
 
 
 @app.cell(hide_code=True)
-def _(mo, n_data_slider):
-    # State for data point offset (can be negative to cancel slider)
-    get_extra, set_extra = mo.state(0)
+def _(mo):
+    # State for clicked points: list of (x, y, error) tuples for heteroscedastic regression
+    get_clicked_points, set_clicked_points = mo.state([])
 
-    def add_point(_):
-        # Only add if total won't exceed 50
-        total = n_data_slider.value + get_extra()
-        if total < 50:
-            set_extra(get_extra() + 1)
+    # State for optimized hyperparameters: None means use slider values
+    get_opt_params, set_opt_params = mo.state(None)
+    get_opt_error, set_opt_error = mo.state(None)
 
-    def reset_to_zero(_):
-        # Set offset to cancel out slider, resulting in 0 total
-        set_extra(-n_data_slider.value)
-
-    add_button = mo.ui.button(label="+1 Data Point", on_click=add_point)
-    reset_button = mo.ui.button(label="Reset", on_click=reset_to_zero)
-
-    return get_extra, add_button, reset_button
+    return (
+        get_clicked_points, set_clicked_points,
+        get_opt_params, set_opt_params,
+        get_opt_error, set_opt_error,
+    )
 
 
 @app.cell(hide_code=True)
@@ -262,8 +289,8 @@ def _(np):
 
 @app.cell(hide_code=True)
 def _(np, sla):
-    def gp_posterior(X, y, X_star, kernel_func, variance, lengthscale, sigma_n):
-        """Compute GP posterior mean and covariance using Cholesky decomposition."""
+    def gp_posterior_hetero(X, y, errors, X_star, kernel_func, variance, lengthscale):
+        """Compute GP posterior with heteroscedastic (per-point) noise."""
         N_data = len(X)
 
         # Compute kernel matrices
@@ -271,16 +298,19 @@ def _(np, sla):
         K_star = kernel_func(X_star, X_star, variance, lengthscale)
         k_star = kernel_func(X, X_star, variance, lengthscale)
 
-        # Add noise to diagonal and compute Cholesky
-        L = np.linalg.cholesky(K + sigma_n**2 * np.eye(N_data))
+        # Heteroscedastic noise: diagonal matrix with per-point variances
+        noise_var = np.diag(errors**2)
 
-        # Solve for alpha: (K + sigma_n^2 I) alpha = y
+        # Add heteroscedastic noise and compute Cholesky
+        L = np.linalg.cholesky(K + noise_var)
+
+        # Solve for alpha
         alpha = sla.solve_triangular(L.T, sla.solve_triangular(L, y, lower=True))
 
-        # Posterior mean: k_star.T @ alpha
+        # Posterior mean
         f_mean = k_star.T @ alpha
 
-        # Posterior covariance: K_star - k_star.T @ (K + sigma_n^2 I)^{-1} @ k_star
+        # Posterior covariance
         v = sla.solve_triangular(L, k_star, lower=True)
         f_cov = K_star - v.T @ v
 
@@ -303,7 +333,19 @@ def _(np, sla):
         except np.linalg.LinAlgError:
             return 1e10  # Return large value if Cholesky fails
 
-    return gp_posterior, neg_log_marginal_likelihood
+    return gp_posterior_hetero, neg_log_marginal_likelihood
+
+
+@app.cell(hide_code=True)
+def _(np, pd):
+    # Static click grid for point selection (100x100 = 10,000 points)
+    _gx = np.linspace(-1.2, 1.2, 100)
+    _gy = np.linspace(-4, 4, 100)
+    click_grid_df = pd.DataFrame(
+        [(x, y) for x in _gx for y in _gy],
+        columns=['x', 'y']
+    )
+    return (click_grid_df,)
 
 
 @app.cell(hide_code=True)
@@ -313,33 +355,45 @@ def _(
     target_dropdown, kernel_dropdown,
     variance_slider, lengthscale_slider,
     n_data_slider, noise_slider, seed_slider,
-    get_extra,
+    get_clicked_points, set_clicked_points,
+    get_opt_params, set_opt_params, get_opt_error, set_opt_error,
 ):
-    # State for optimized hyperparameters: None means use slider values
-    # Stores (variance, lengthscale, noise) when optimized
-    get_opt_params, set_opt_params = mo.state(None)
-    get_opt_error, set_opt_error = mo.state(None)
-
     def run_optimization(_):
         """Optimize hyperparameters to maximize marginal likelihood."""
         try:
             set_opt_error(None)
             func_type = target_dropdown.value
             kernel_type = kernel_dropdown.value
-            n_data = max(0, n_data_slider.value + get_extra())
+            n_data = n_data_slider.value
             sigma_n = noise_slider.value
             seed = seed_slider.value
+            clicked = get_clicked_points() or []
 
-            if n_data < 2:
+            # Combine slider-generated and clicked data
+            if n_data > 0:
+                np.random.seed(seed)
+                X_slider = np.sort(np.random.uniform(-1, 1, n_data))
+                y_slider = target_function(X_slider, func_type) + np.random.normal(0, sigma_n, n_data)
+            else:
+                X_slider = np.array([])
+                y_slider = np.array([])
+
+            if clicked:
+                clicked_arr = np.array(clicked)
+                X_clicked = clicked_arr[:, 0]
+                y_clicked = clicked_arr[:, 1]
+            else:
+                X_clicked = np.array([])
+                y_clicked = np.array([])
+
+            X_train = np.concatenate([X_slider, X_clicked]) if len(X_slider) > 0 or len(X_clicked) > 0 else np.array([])
+            y_train = np.concatenate([y_slider, y_clicked]) if len(y_slider) > 0 or len(y_clicked) > 0 else np.array([])
+
+            if len(X_train) < 2:
                 set_opt_error("Need at least 2 data points")
                 return
 
             kernel_func = get_kernel_func(kernel_type)
-
-            # Generate training data (use slider noise for data generation)
-            np.random.seed(seed)
-            X_train = np.sort(np.random.uniform(-1, 1, n_data))
-            y_train = target_function(X_train, func_type) + np.random.normal(0, sigma_n, n_data)
 
             # Objective function (optimize in log space for positivity)
             def objective(log_params):
@@ -370,26 +424,33 @@ def _(
         set_opt_params(None)
         set_opt_error(None)
 
-    optimize_button = mo.ui.button(label="Optimize", on_click=run_optimization)
-    reset_opt_button = mo.ui.button(label="Reset", on_click=reset_optimization)
+    def clear_clicked_points(_):
+        set_clicked_points([])
 
-    return get_opt_params, get_opt_error, optimize_button, reset_opt_button
+    optimize_button = mo.ui.button(label="Optimize", on_click=run_optimization)
+    reset_opt_button = mo.ui.button(label="Reset Opt", on_click=reset_optimization)
+    clear_points_button = mo.ui.button(label="Clear Points", on_click=clear_clicked_points)
+
+    return optimize_button, reset_opt_button, clear_points_button
 
 
 @app.cell(hide_code=True)
 def _(
-    np, plt,
-    target_function, get_kernel_func, gp_posterior,
+    alt, np, pd, mo,
+    target_function, get_kernel_func, gp_posterior_hetero,
     target_dropdown, kernel_dropdown, variance_slider, lengthscale_slider,
     n_data_slider, noise_slider, seed_slider, n_samples_slider,
-    get_extra, get_opt_params,
+    click_uncertainty_slider,
+    get_clicked_points, get_opt_params,
+    click_grid_df,
 ):
     # Get parameter values
     func_type = target_dropdown.value
     kernel_type = kernel_dropdown.value
-    n_data = max(0, n_data_slider.value + get_extra())
+    n_data = n_data_slider.value
     seed = seed_slider.value
     n_samples = n_samples_slider.value
+    click_uncertainty = click_uncertainty_slider.value
 
     # Use optimized params if available, otherwise use sliders
     opt_params = get_opt_params()
@@ -400,159 +461,313 @@ def _(
         lengthscale = lengthscale_slider.value
         sigma_n = noise_slider.value
 
-    # Fixed y-axis limits
+    # Fixed axis limits
+    x_min, x_max = -1.2, 1.2
     y_min, y_max = -4, 4
 
     # Get kernel function
     kernel_func = get_kernel_func(kernel_type)
 
-    # Generate training data
+    # Generate slider-based training data (homoscedastic noise)
     np.random.seed(seed)
     if n_data > 0:
-        X_train = np.sort(np.random.uniform(-1, 1, n_data))
-        y_true_train = target_function(X_train, func_type)
-        # Use slider noise for data generation, not optimized noise
+        X_slider = np.sort(np.random.uniform(-1, 1, n_data))
+        y_true_slider = target_function(X_slider, func_type)
         data_noise = noise_slider.value
-        y_train = y_true_train + np.random.normal(0, data_noise, n_data)
+        y_slider = y_true_slider + np.random.normal(0, data_noise, n_data)
+        errors_slider = np.full(n_data, data_noise)  # Homoscedastic
+    else:
+        X_slider = np.array([])
+        y_slider = np.array([])
+        errors_slider = np.array([])
+
+    # Get clicked points (heteroscedastic: x, y, error)
+    clicked_points = get_clicked_points() or []
+    if clicked_points:
+        clicked_arr = np.array(clicked_points)
+        X_clicked = clicked_arr[:, 0]
+        y_clicked = clicked_arr[:, 1]
+        errors_clicked = clicked_arr[:, 2]
+    else:
+        X_clicked = np.array([])
+        y_clicked = np.array([])
+        errors_clicked = np.array([])
+
+    # Combine all training data
+    all_X = []
+    all_y = []
+    all_errors = []
+
+    if len(X_slider) > 0:
+        all_X.append(X_slider)
+        all_y.append(y_slider)
+        all_errors.append(errors_slider)
+
+    if len(X_clicked) > 0:
+        all_X.append(X_clicked)
+        all_y.append(y_clicked)
+        all_errors.append(errors_clicked)
+
+    if all_X:
+        X_train = np.concatenate(all_X)
+        y_train = np.concatenate(all_y)
+        errors_train = np.concatenate(all_errors)
     else:
         X_train = np.array([])
         y_train = np.array([])
+        errors_train = np.array([])
 
-    # Test points
-    X_test = np.linspace(-1.2, 1.2, 200)
+    total_points = len(X_train)
+
+    # Test points for plotting
+    X_test = np.linspace(x_min, x_max, 200)
     y_true_test = target_function(X_test, func_type)
 
-    # Create 2x2 grid
-    fig, axs = plt.subplots(2, 2, figsize=(7, 7))
-    axs = list(axs.flat)
-
-    # Configure axes
-    titles = ['Prior', 'Posterior', 'Posterior Samples', 'Uncertainty Breakdown']
-    for ax, title in zip(axs, titles):
-        ax.set_title(title, fontsize=11)
-        ax.tick_params(labelsize=8)
-
-    # Prior panel (top-left) - with prior samples
-    ax = axs[0]
-    prior_mean = np.zeros_like(X_test)
-    prior_std = np.sqrt(variance) * np.ones_like(X_test)
-
-    # Draw prior samples
-    if n_samples > 0:
-        K_prior = kernel_func(X_test, X_test, variance, lengthscale) + 1e-6 * np.eye(len(X_test))
-        L_prior = np.linalg.cholesky(K_prior)
-        np.random.seed(seed + 1000)  # Different seed for prior samples
-        for _ in range(n_samples):
-            z = np.random.randn(len(X_test))
-            f_sample = prior_mean + L_prior @ z
-            ax.plot(X_test, f_sample, 'C1-', alpha=0.4, lw=1)
-
-    ax.plot(X_test, prior_mean, 'C0-', lw=2, label='Prior mean')
-    ax.fill_between(X_test, prior_mean - 2*prior_std, prior_mean + 2*prior_std,
-                   color='C0', alpha=0.2, label='$\\mu \\pm 2\\sigma$')
-    ax.plot(X_test, y_true_test, 'k--', lw=1.5, label='True function')
-    ax.set_xlabel('$x$', fontsize=10)
-    ax.set_ylabel('$f(x)$', fontsize=10)
-    ax.legend(fontsize=8, loc='upper right')
-    ax.set_xlim(-1.2, 1.2)
-    ax.set_ylim(y_min, y_max)
-    ax.grid(True, alpha=0.3)
-
-    # Posterior panel (top-right)
-    ax = axs[1]
-
-    if n_data > 0:
-        f_mean, f_cov = gp_posterior(X_train, y_train, X_test, kernel_func, variance, lengthscale, sigma_n)
-        f_std = np.sqrt(np.diag(f_cov))
-        f_std_tot = np.sqrt(np.diag(f_cov) + sigma_n**2)
+    # Compute GP posterior (heteroscedastic if we have any data)
+    if total_points > 0:
+        # Use heteroscedastic GP
+        f_mean, f_cov = gp_posterior_hetero(X_train, y_train, errors_train, X_test, kernel_func, variance, lengthscale)
+        # For total uncertainty, use mean of error variances as representative noise
+        mean_noise = np.mean(errors_train)
     else:
         f_mean = np.zeros_like(X_test)
-        f_std = np.sqrt(variance) * np.ones_like(X_test)
-        f_std_tot = np.sqrt(variance + sigma_n**2) * np.ones_like(X_test)
+        f_cov = kernel_func(X_test, X_test, variance, lengthscale)
+        mean_noise = sigma_n
 
-    ax.plot(X_test, f_mean, 'C0-', lw=2, label='Posterior mean')
-    ax.fill_between(X_test, f_mean - 2*f_std, f_mean + 2*f_std,
-                   color='C0', alpha=0.2, label='Epistemic')
-    ax.fill_between(X_test, f_mean - 2*f_std_tot, f_mean - 2*f_std,
-                   color='C1', alpha=0.2, label='Total')
-    ax.fill_between(X_test, f_mean + 2*f_std, f_mean + 2*f_std_tot,
-                   color='C1', alpha=0.2)
-    ax.plot(X_test, y_true_test, 'k--', lw=1.5, label='True function')
-    if n_data > 0:
-        ax.scatter(X_train, y_train, c='red', s=50, zorder=5,
-                  edgecolor='white', linewidth=1, label='Data')
-    ax.set_xlabel('$x$', fontsize=10)
-    ax.set_ylabel('$f(x)$', fontsize=10)
-    ax.legend(fontsize=7, loc='upper right')
-    ax.set_xlim(-1.2, 1.2)
-    ax.set_ylim(y_min, y_max)
-    ax.grid(True, alpha=0.3)
+    f_std = np.sqrt(np.diag(f_cov))
+    f_std_tot = np.sqrt(np.diag(f_cov) + mean_noise**2)
 
-    # Posterior Samples panel (bottom-left)
-    ax = axs[2]
-
-    if n_data > 0:
-        f_mean, f_cov = gp_posterior(X_train, y_train, X_test, kernel_func, variance, lengthscale, sigma_n)
-        # Add jitter for numerical stability
-        f_cov = f_cov + 1e-6 * np.eye(len(X_test))
-    else:
-        f_mean = np.zeros_like(X_test)
-        f_cov = kernel_func(X_test, X_test, variance, lengthscale) + 1e-6 * np.eye(len(X_test))
-
-    # Sample from posterior
+    # Generate samples from posterior
+    samples_data = []
     if n_samples > 0:
-        L = np.linalg.cholesky(f_cov)
-        np.random.seed(seed + 2000)  # Different seed for posterior samples
-        for _ in range(n_samples):
+        f_cov_jitter = f_cov + 1e-6 * np.eye(len(X_test))
+
+        L = np.linalg.cholesky(f_cov_jitter)
+        np.random.seed(seed + 2000)
+        for i in range(n_samples):
             z = np.random.randn(len(X_test))
             f_sample = f_mean + L @ z
-            ax.plot(X_test, f_sample, 'C1-', alpha=0.5, lw=1)
+            for x_val, y_val in zip(X_test, f_sample):
+                samples_data.append({'x': x_val, 'y': y_val, 'sample': f'Sample {i+1}'})
 
-    ax.plot(X_test, f_mean, 'C0-', lw=2, label='Posterior mean')
-    ax.plot(X_test, y_true_test, 'k--', lw=1.5, label='True function')
-    if n_data > 0:
-        ax.scatter(X_train, y_train, c='red', s=50, zorder=5,
-                  edgecolor='white', linewidth=1, label='Data')
-    ax.set_xlabel('$x$', fontsize=10)
-    ax.set_ylabel('$f(x)$', fontsize=10)
-    ax.legend(fontsize=8, loc='upper right')
-    ax.set_xlim(-1.2, 1.2)
-    ax.set_ylim(y_min, y_max)
-    ax.grid(True, alpha=0.3)
+    # Build DataFrames
+    gt_df = pd.DataFrame({'x': X_test, 'y': y_true_test})
+    mean_df = pd.DataFrame({'x': X_test, 'y': f_mean})
 
-    # Uncertainty Breakdown panel (bottom-right)
-    ax = axs[3]
+    # Uncertainty bands
+    band_df = pd.DataFrame({
+        'x': X_test,
+        'y_mean': f_mean,
+        'y_lower_ep': f_mean - 2 * f_std,
+        'y_upper_ep': f_mean + 2 * f_std,
+        'y_lower_tot': f_mean - 2 * f_std_tot,
+        'y_upper_tot': f_mean + 2 * f_std_tot,
+    })
 
-    if n_data > 0:
-        f_mean, f_cov = gp_posterior(X_train, y_train, X_test, kernel_func, variance, lengthscale, sigma_n)
-        epistemic = np.sqrt(np.diag(f_cov))
-        aleatoric = sigma_n * np.ones_like(X_test)
-        total = np.sqrt(np.diag(f_cov) + sigma_n**2)
+    # Slider-generated data points (blue) - with error bars
+    if len(X_slider) > 0:
+        slider_data_df = pd.DataFrame({
+            'x': X_slider,
+            'y': y_slider,
+            'y_lower': y_slider - errors_slider,
+            'y_upper': y_slider + errors_slider,
+        })
     else:
-        epistemic = np.sqrt(variance) * np.ones_like(X_test)
-        aleatoric = sigma_n * np.ones_like(X_test)
-        total = np.sqrt(variance + sigma_n**2) * np.ones_like(X_test)
+        slider_data_df = pd.DataFrame(columns=['x', 'y', 'y_lower', 'y_upper'])
 
-    ax.fill_between(X_test, 0, epistemic, color='C0', alpha=0.5, label='Epistemic')
-    ax.fill_between(X_test, epistemic, epistemic + aleatoric,
-                   color='C1', alpha=0.5, label='Aleatoric')
-    ax.plot(X_test, total, 'k-', lw=2, label='Total $\\sigma$')
+    # Clicked data points (red) - with custom error bars
+    if len(X_clicked) > 0:
+        clicked_data_df = pd.DataFrame({
+            'x': X_clicked,
+            'y': y_clicked,
+            'y_lower': y_clicked - errors_clicked,
+            'y_upper': y_clicked + errors_clicked,
+        })
+    else:
+        clicked_data_df = pd.DataFrame(columns=['x', 'y', 'y_lower', 'y_upper'])
 
-    # Mark data locations
-    if n_data > 0:
-        for x_d in X_train:
-            ax.axvline(x_d, color='red', alpha=0.3, lw=1)
+    # Samples
+    samples_df = pd.DataFrame(samples_data) if samples_data else pd.DataFrame(columns=['x', 'y', 'sample'])
 
-    ax.set_xlabel('$x$', fontsize=10)
-    ax.set_ylabel('Uncertainty $\\sigma$', fontsize=10)
-    ax.legend(fontsize=8, loc='upper right')
-    ax.set_xlim(-1.2, 1.2)
-    ax.set_ylim(0, 3.0)  # Fixed y-limit for uncertainty
-    ax.grid(True, alpha=0.3)
+    # Brush size indicator - shows current click uncertainty as a vertical bar in corner
+    brush_indicator_df = pd.DataFrame({
+        'x': [x_max - 0.15],
+        'y': [y_max - 0.5],
+        'y_lower': [y_max - 0.5 - click_uncertainty],
+        'y_upper': [y_max - 0.5 + click_uncertainty],
+    })
 
-    plt.tight_layout(pad=1.0)
-    gp_fig = fig
-    return (gp_fig,)
+    # Define scales
+    x_scale = alt.Scale(domain=[x_min, x_max])
+    y_scale = alt.Scale(domain=[y_min, y_max])
+
+    # Click selection for adding points
+    click_select = alt.selection_point(on='click', nearest=True, fields=['x', 'y'], name='click_select')
+
+    # Build chart layers
+    # Total uncertainty band (outer, lighter)
+    total_band = alt.Chart(band_df).mark_area(
+        opacity=0.15, color='#ff7f0e'
+    ).encode(
+        x=alt.X('x:Q', scale=x_scale, title='x'),
+        y=alt.Y('y_lower_tot:Q', scale=y_scale, title='f(x)'),
+        y2='y_upper_tot:Q'
+    )
+
+    # Epistemic uncertainty band (inner, darker)
+    epistemic_band = alt.Chart(band_df).mark_area(
+        opacity=0.3, color='#1f77b4'
+    ).encode(
+        x=alt.X('x:Q', scale=x_scale),
+        y=alt.Y('y_lower_ep:Q', scale=y_scale),
+        y2='y_upper_ep:Q'
+    )
+
+    # Posterior mean line
+    mean_line = alt.Chart(mean_df).mark_line(
+        color='#1f77b4', strokeWidth=3
+    ).encode(
+        x=alt.X('x:Q', scale=x_scale),
+        y=alt.Y('y:Q', scale=y_scale)
+    )
+
+    # Ground truth line
+    gt_line = alt.Chart(gt_df).mark_line(
+        color='black', strokeWidth=3, strokeDash=[5, 5], opacity=0.7
+    ).encode(
+        x=alt.X('x:Q', scale=x_scale),
+        y=alt.Y('y:Q', scale=y_scale)
+    )
+
+    # Build layers list
+    layers = [total_band, epistemic_band]
+
+    # Samples (if any)
+    if len(samples_df) > 0:
+        samples_layer = alt.Chart(samples_df).mark_line(
+            strokeWidth=1.5, opacity=0.4
+        ).encode(
+            x=alt.X('x:Q', scale=x_scale),
+            y=alt.Y('y:Q', scale=y_scale),
+            color=alt.Color('sample:N', legend=None)
+        )
+        layers.append(samples_layer)
+
+    layers.append(mean_line)
+    layers.append(gt_line)
+
+    # Slider-generated data points (blue) with error bars
+    if len(slider_data_df) > 0:
+        # Error bars
+        slider_errorbars = alt.Chart(slider_data_df).mark_rule(
+            color='#1f77b4', strokeWidth=2, opacity=0.6
+        ).encode(
+            x=alt.X('x:Q', scale=x_scale),
+            y=alt.Y('y_lower:Q', scale=y_scale),
+            y2='y_upper:Q'
+        )
+        # Points
+        slider_points = alt.Chart(slider_data_df).mark_circle(
+            color='#1f77b4', size=120, opacity=0.8
+        ).encode(
+            x=alt.X('x:Q', scale=x_scale),
+            y=alt.Y('y:Q', scale=y_scale)
+        )
+        layers.append(slider_errorbars)
+        layers.append(slider_points)
+
+    # Clicked data points (red) with error bars
+    if len(clicked_data_df) > 0:
+        # Error bars
+        clicked_errorbars = alt.Chart(clicked_data_df).mark_rule(
+            color='#d62728', strokeWidth=3, opacity=0.8
+        ).encode(
+            x=alt.X('x:Q', scale=x_scale),
+            y=alt.Y('y_lower:Q', scale=y_scale),
+            y2='y_upper:Q'
+        )
+        # Points
+        clicked_points_layer = alt.Chart(clicked_data_df).mark_circle(
+            color='#d62728', size=150, opacity=0.9
+        ).encode(
+            x=alt.X('x:Q', scale=x_scale),
+            y=alt.Y('y:Q', scale=y_scale)
+        )
+        layers.append(clicked_errorbars)
+        layers.append(clicked_points_layer)
+
+    # Brush size indicator in top-right corner
+    brush_indicator_bar = alt.Chart(brush_indicator_df).mark_rule(
+        color='#d62728', strokeWidth=4, opacity=0.7
+    ).encode(
+        x=alt.X('x:Q', scale=x_scale),
+        y=alt.Y('y_lower:Q', scale=y_scale),
+        y2='y_upper:Q'
+    )
+    brush_indicator_point = alt.Chart(brush_indicator_df).mark_circle(
+        color='#d62728', size=100, opacity=0.7
+    ).encode(
+        x=alt.X('x:Q', scale=x_scale),
+        y=alt.Y('y:Q', scale=y_scale)
+    )
+    layers.append(brush_indicator_bar)
+    layers.append(brush_indicator_point)
+
+    # Invisible click layer (must be on top for interaction)
+    click_layer = alt.Chart(click_grid_df).mark_point(
+        opacity=0, size=100
+    ).encode(
+        x=alt.X('x:Q', scale=x_scale),
+        y=alt.Y('y:Q', scale=y_scale)
+    ).add_params(click_select)
+    layers.append(click_layer)
+
+    # Combine layers
+    chart = alt.layer(*layers).properties(
+        width='container', height=450,
+        title='Gaussian Process Posterior'
+    ).configure_axis(
+        grid=True, gridOpacity=0.3,
+        labelFontSize=14, titleFontSize=16
+    ).configure_title(
+        fontSize=18
+    )
+
+    interactive_chart = mo.ui.altair_chart(chart)
+
+    # Count points for display
+    n_slider_points = len(X_slider)
+    n_clicked_points = len(X_clicked)
+
+    return interactive_chart, total_points, n_slider_points, n_clicked_points, click_uncertainty
+
+
+@app.cell(hide_code=True)
+def _(interactive_chart):
+    # Pass-through display cell
+    chart_display = interactive_chart
+    return (chart_display,)
+
+
+@app.cell(hide_code=True)
+def _(interactive_chart, click_grid_df, get_clicked_points, set_clicked_points, click_uncertainty, pd):
+    # Click handler - reads selection, updates state with current uncertainty
+    _current = get_clicked_points() or []
+    _filtered = interactive_chart.apply_selection(click_grid_df)
+
+    # Check if valid DataFrame
+    if _filtered is not None and isinstance(_filtered, pd.DataFrame) and len(_filtered) > 0 and len(_filtered) < len(click_grid_df):
+        # User clicked on a point
+        _new_x = float(_filtered['x'].iloc[0])
+        _new_y = float(_filtered['y'].iloc[0])
+        _new_point = (_new_x, _new_y, click_uncertainty)
+        # Only add if x position not already present (avoid duplicates at same x)
+        _existing_x = [p[0] for p in _current]
+        if _new_x not in _existing_x:
+            set_clicked_points(_current + [_new_point])
+
+    # Return nothing to avoid circular deps
+    return ()
 
 
 @app.cell(hide_code=True)
@@ -561,8 +776,10 @@ def _(
     target_dropdown, kernel_dropdown,
     variance_slider, lengthscale_slider,
     n_data_slider, noise_slider, seed_slider, n_samples_slider,
-    add_button, reset_button, get_extra,
-    optimize_button, reset_opt_button, get_opt_params, get_opt_error,
+    click_uncertainty_slider,
+    optimize_button, reset_opt_button, clear_points_button,
+    get_clicked_points, get_opt_params, get_opt_error,
+    n_slider_points, n_clicked_points,
 ):
     # Function section
     func_section = mo.vstack([
@@ -590,15 +807,18 @@ def _(
         _opt_info,
     ], gap="0.3em")
 
-    # Data section - show total count and buttons
-    _total = max(0, n_data_slider.value + get_extra())
+    # Data section
+    _n_clicked = len(get_clicked_points() or [])
+
     data_section = mo.vstack([
         mo.Html("<h4>Data</h4>"),
         n_data_slider,
-        mo.hstack([add_button, reset_button], gap="0.5em"),
-        mo.Html(f"<small>Total: {_total} points</small>"),
         noise_slider,
         seed_slider,
+        mo.Html("<h4>Click to Add</h4>"),
+        click_uncertainty_slider,
+        mo.hstack([clear_points_button], gap="0.5em"),
+        mo.Html(f"<small>Random: {n_slider_points} | Clicked: {_n_clicked}</small>"),
     ], gap="0.3em")
 
     # Sampling section
@@ -612,19 +832,24 @@ def _(
     sidebar_html = mo.Html(f'''
     <div class="app-sidebar">
         {sidebar}
+        <p style="font-size: 0.85em; color: #666; margin-top: 1em;">
+            <b>Tip:</b> Click on plot to add points (red). Adjust uncertainty slider to change error bar size for new points. Brush indicator in top-right shows current size.
+        </p>
     </div>
     ''')
     return (sidebar_html,)
 
 
 @app.cell(hide_code=True)
-def _(mo, header, gp_fig, sidebar_html):
+def _(mo, header, chart_display, sidebar_html):
     # Combined layout: header on top, plot on left, controls on right
     mo.Html(f'''
     {header}
     <div class="app-layout">
-        <div class="app-plot">{mo.as_html(gp_fig)}</div>
-        {sidebar_html}
+        <div class="app-plot">{mo.as_html(chart_display)}</div>
+        <div class="app-sidebar-container">
+            {sidebar_html}
+        </div>
     </div>
     ''')
     return

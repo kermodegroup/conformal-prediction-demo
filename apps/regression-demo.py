@@ -7,6 +7,7 @@
 #     "popsregression==0.3.5",
 #     "scikit-learn==1.6.1",
 #     "seaborn==0.13.2",
+#     "pillow",
 #     "qrcode==8.2",
 #     "scipy",
 # ]
@@ -1432,7 +1433,7 @@ def _():
 
     # Generate QR code
     qr = qrcode.QRCode(version=1, box_size=10, border=4)
-    qr.add_data('https://sciml.warwick.ac.uk/regression-demo.html')
+    qr.add_data('https://kermodegroup.github.io/demos/regression-demo.html')
     qr.make(fit=True)
 
     img = qr.make_image(fill_color="black", back_color="white")

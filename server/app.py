@@ -2,13 +2,12 @@ import marimo
 import tomllib
 from pathlib import Path
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 NOTEBOOKS_DIR = Path(__file__).parent / "notebooks"
-WASM_DIR = Path(__file__).parent / "wasm"
 CONFIG_FILE = Path(__file__).parent / "demos.toml"
+GITHUB_PAGES_BASE = "https://kermodegroup.github.io/demos"
 
 app = FastAPI()
 
@@ -29,13 +28,6 @@ for notebook in sorted(NOTEBOOKS_DIR.glob("*.py")):
     server = server.with_app(path=f"/{name}", root=str(notebook))
     live_notebooks.append(name)
 
-# Find WASM notebooks
-wasm_notebooks = []
-if WASM_DIR.exists():
-    for html_file in sorted(WASM_DIR.glob("*.html")):
-        if html_file.name != "index.html":
-            wasm_notebooks.append(html_file.stem)
-
 # Load demo config
 demo_config = []
 if CONFIG_FILE.exists():
@@ -47,19 +39,22 @@ if CONFIG_FILE.exists():
 config_by_name = {d["name"]: d for d in demo_config}
 config_order = [d["name"] for d in demo_config]
 
-# Serve WASM assets at /assets/
-if WASM_DIR.exists() and (WASM_DIR / "assets").exists():
-    app.mount("/assets", StaticFiles(directory=str(WASM_DIR / "assets")), name="assets")
+# Get WASM notebooks from config (those not in live_notebooks)
+wasm_notebooks = [
+    d["name"]
+    for d in demo_config
+    if d["name"] not in live_notebooks and not d.get("hidden", False)
+]
 
-# Serve WASM extra files at /files/
-if WASM_DIR.exists() and (WASM_DIR / "files").exists():
-    app.mount("/files", StaticFiles(directory=str(WASM_DIR / "files")), name="files")
 
 def get_display_title(name):
     """Get display title from config or auto-generate."""
     if name in config_by_name:
-        return config_by_name[name].get("title", name.replace("-", " ").replace("_", " ").title())
+        return config_by_name[name].get(
+            "title", name.replace("-", " ").replace("_", " ").title()
+        )
     return name.replace("-", " ").replace("_", " ").title()
+
 
 def get_sort_key(name):
     """Get sort key - config order first, then alphabetical."""
@@ -67,15 +62,19 @@ def get_sort_key(name):
         return (0, config_order.index(name))
     return (1, name)
 
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     all_notebooks = []
+
+    # Add live notebooks (served by this server)
     for name in live_notebooks:
         if name not in config_by_name or not config_by_name[name].get("hidden", False):
             all_notebooks.append((name, f"/{name}/", "live"))
+
+    # Add WASM notebooks (link to GitHub Pages)
     for name in wasm_notebooks:
-        if name not in config_by_name or not config_by_name[name].get("hidden", False):
-            all_notebooks.append((name, f"/{name}.html", "wasm"))
+        all_notebooks.append((name, f"{GITHUB_PAGES_BASE}/{name}.html", "wasm"))
 
     # Sort by config order, then alphabetically
     all_notebooks.sort(key=lambda x: get_sort_key(x[0]))
@@ -101,28 +100,31 @@ def index():
             .badge {{ font-size: 0.7em; padding: 2px 6px; border-radius: 3px; margin-left: 8px; text-transform: uppercase; }}
             .wasm {{ background: #d4edda; color: #155724; }}
             .live {{ background: #fff3cd; color: #856404; }}
+            .note {{ background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 1em; margin: 1.5em 0; }}
         </style>
     </head>
     <body>
         <h1>SciML Notebooks</h1>
-        <p>Interactive scientific machine learning demonstrations.</p>
+        <p>Interactive scientific machine learning demonstrations.
+        Developed by <a href="https://warwick.ac.uk/jrkermode">James Kermode</a>
+        to support teaching of Scientific Machine Learning (ES98E) and
+        Predictive Modelling and Uncertainty Quantification (PX914)
+        in the <a href="https://warwick.ac.uk/HetSys">HetSys CDT</a>
+        and <a href="https://warwick.ac.uk/pmsc">Predictive Modelling and Scientific Computing MSc</a>.</p>
         <ul>{notebook_links}</ul>
+        <div class="note">
+            <p><strong>WASM</strong> notebooks run in your browser (no login required).
+            <strong>LIVE</strong> notebooks require University of Warwick SSO.</p>
+        </div>
     </body>
     </html>
     """
 
-# Explicit route for each WASM notebook HTML file
-for wasm_name in wasm_notebooks:
-    wasm_path = WASM_DIR / f"{wasm_name}.html"
-    app.add_api_route(
-        f"/{wasm_name}.html",
-        lambda p=wasm_path: FileResponse(p, media_type="text/html"),
-        methods=["GET"],
-    )
 
-# Mount marimo server last (catch-all for live notebooks)
+# Mount marimo server (for live notebooks)
 app.mount("/", server.build())
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=2718)

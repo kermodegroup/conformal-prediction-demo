@@ -6,6 +6,7 @@
 #     "numpy==2.2.5",
 #     "scikit-learn==1.6.1",
 #     "seaborn==0.13.2",
+#     "pillow",
 #     "qrcode==8.2",
 # ]
 # ///
@@ -64,7 +65,23 @@ def _(mo):
             background-color: #f8f9fa;
             border-radius: 8px;
             border: 1px solid #dee2e6;
+            width: 30%;
             min-width: 280px;
+            max-width: 400px;
+            flex-shrink: 0;
+        }
+
+        @media (max-width: 768px) {
+            .app-layout {
+                flex-direction: column;
+                height: auto;
+                overflow-y: auto;
+            }
+            .app-sidebar {
+                width: 100%;
+                max-width: none;
+                min-width: auto;
+            }
         }
 
         .app-sidebar h4 {
@@ -102,7 +119,7 @@ def _():
 
     # Generate QR code
     qr = qrcode.QRCode(version=1, box_size=10, border=4)
-    qr.add_data('https://sciml.warwick.ac.uk/basis-demo.html')
+    qr.add_data('https://kermodegroup.github.io/demos/basis-demo.html')
     qr.make(fit=True)
 
     img = qr.make_image(fill_color="black", back_color="white")
@@ -315,12 +332,19 @@ def _(
         # Fit the model
         w = fit_least_squares(Phi_train, y_train)
         y_pred = Phi_test @ w
+        y_pred_train = Phi_train @ w
+
+        # Compute RMSE and MAE on training data
+        rmse = np.sqrt(np.mean((y_pred_train - y_train)**2))
+        mae = np.mean(np.abs(y_pred_train - y_train))
 
         results[basis_type] = {
             'Phi_train': Phi_train,
             'Phi_test': Phi_test,
             'w': w,
             'y_pred': y_pred,
+            'rmse': rmse,
+            'mae': mae,
         }
 
     # Create 2x2 grid
@@ -402,7 +426,7 @@ def _(
 
     plt.tight_layout(pad=1.0)
     basis_fig = fig
-    return basis_fig, condition_numbers
+    return basis_fig, condition_numbers, results
 
 
 @app.cell(hide_code=True)
@@ -458,35 +482,58 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo, header, basis_fig, condition_numbers, sidebar_html):
-    # Build condition number display
-    if condition_numbers:
-        _cond_items = []
-        for _bt, _cond in condition_numbers.items():
-            _name = {'polynomial': 'Polynomial', 'rbf': 'RBF', 'fourier': 'Fourier'}[_bt]
-            # Color code: green if good (<1e4), yellow if moderate, red if bad (>1e8)
+def _(mo, header, basis_fig, condition_numbers, results, sidebar_html):
+    # Build metrics table
+    _basis_names = {'polynomial': 'Polynomial', 'rbf': 'RBF', 'fourier': 'Fourier'}
+
+    if results:
+        _rows = []
+        for _bt in results.keys():
+            _name = _basis_names[_bt]
+            _cond = condition_numbers[_bt]
+            _rmse = results[_bt]['rmse']
+            _mae = results[_bt]['mae']
+            # Color code condition: green if good (<1e4), yellow if moderate, red if bad (>1e8)
             if _cond < 1e4:
                 _color = "#28a745"  # green
             elif _cond < 1e8:
                 _color = "#ffc107"  # yellow
             else:
                 _color = "#dc3545"  # red
-            _cond_items.append(f'<span style="color:{_color}; margin-right: 1.5em;"><b>{_name}:</b> {_cond:.2e}</span>')
-        cond_html = ''.join(_cond_items)
+            _rows.append(f'''
+                <tr>
+                    <td style="padding: 2px 12px 2px 0;"><b>{_name}</b></td>
+                    <td style="padding: 2px 12px; text-align: right; color: {_color};">{_cond:.2e}</td>
+                    <td style="padding: 2px 12px; text-align: right;">{_rmse:.4f}</td>
+                    <td style="padding: 2px 12px; text-align: right;">{_mae:.4f}</td>
+                </tr>
+            ''')
+        _table_rows = ''.join(_rows)
+        metrics_html = f'''
+            <table style="border-collapse: collapse; font-size: 13px;">
+                <tr style="border-bottom: 1px solid #dee2e6;">
+                    <th style="padding: 2px 12px 2px 0; text-align: left;">Basis</th>
+                    <th style="padding: 2px 12px; text-align: right;">Condition</th>
+                    <th style="padding: 2px 12px; text-align: right;">RMSE</th>
+                    <th style="padding: 2px 12px; text-align: right;">MAE</th>
+                </tr>
+                {_table_rows}
+            </table>
+        '''
     else:
-        cond_html = '<span style="color:#6c757d;">No basis selected</span>'
+        metrics_html = '<span style="color:#6c757d; font-size: 13px;">No basis selected</span>'
 
-    # Combined layout: header on top, plot and sidebar, condition numbers at bottom
+    # Combined layout: header on top, plot and sidebar with metrics below
     mo.Html(f'''
     {header}
     <div class="app-layout">
+        <div class="app-plot">{mo.as_html(basis_fig)}</div>
         <div>
-            <div class="app-plot">{mo.as_html(basis_fig)}</div>
-            <div style="margin-top: 0.5em; padding: 0.5em; background: #f8f9fa; border-radius: 4px; font-size: 13px;">
-                <b>Condition number:</b> {cond_html}
+            {sidebar_html}
+            <div style="margin-top: 1em; padding: 0.75em; background: #f8f9fa; border-radius: 8px; border: 1px solid #dee2e6;">
+                {metrics_html}
             </div>
         </div>
-        {sidebar_html}
     </div>
     ''')
     return

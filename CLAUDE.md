@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repository contains interactive research demonstrations built with [marimo](https://marimo.io), a reactive Python notebook framework. Demos are deployed to https://sciml.warwick.ac.uk with automatic WASM/live server selection based on dependencies.
+This repository contains interactive research demonstrations built with [marimo](https://marimo.io), a reactive Python notebook framework. Demos are deployed to two locations:
+- **WASM notebooks**: https://kermodegroup.github.io/demos (public, no auth)
+- **Live notebooks**: https://sciml.warwick.ac.uk (SSO protected)
 
 ## Repository Structure
 
@@ -16,29 +18,32 @@ demos/
 ├── scripts/
 │   ├── build.py             # WASM HTML export script
 │   ├── categorize_notebooks.py  # WASM vs live detection
+│   ├── generate_index.py    # GitHub Pages index generator
 │   ├── deploy.sh            # Server-side deployment (systemd + nginx)
-│   └── deploy-warwick.sh    # Local deployment script (requires 2FA)
-├── 404.html                 # GitHub Pages redirect
-└── index.html               # GitHub Pages redirect
+│   └── deploy-warwick.sh    # Local deployment script (live notebooks only)
+├── server/
+│   └── app.py               # FastAPI server for live notebooks
+└── .github/workflows/
+    └── pages.yml            # GitHub Actions for WASM deployment
 ```
 
 ## Deployment Architecture
 
-### Dual Deployment Modes
+### Split Deployment
 
-Notebooks are automatically categorized and deployed in one of two modes:
+Notebooks are automatically categorized and deployed to different hosts:
 
-1. **WASM (Static)** - Notebooks in `apps/` with pure Python dependencies
+1. **WASM (GitHub Pages)** - Notebooks in `apps/` with pure Python dependencies
+   - Deployed via GitHub Actions to kermodegroup.github.io/demos
    - Exported to HTML+WASM via `marimo export html-wasm`
-   - Served as static files from `/var/www/marimo-wasm/`
    - No authentication required
    - Runs entirely in browser via Pyodide
 
-2. **Live (Server)** - Notebooks in `notebooks/` with native dependencies
+2. **Live (sciml.warwick.ac.uk)** - Notebooks in `notebooks/` with native dependencies
+   - Deployed manually via `deploy-warwick.sh`
    - Each notebook runs as a separate marimo process
-   - Managed by systemd services (port 2718+)
    - Proxied through nginx with WebSocket support
-   - Protected by basic auth
+   - Protected by University of Warwick SSO
 
 ### WASM Incompatible Packages
 
@@ -66,64 +71,43 @@ python scripts/build.py --sync-lib --output-dir _wasm_site
 
 ### Deployment
 
-Deployment requires 2FA authentication to the university server, so it must be done locally:
+**WASM notebooks** deploy automatically via GitHub Actions when changes are pushed to `apps/`.
+
+**Live notebooks** require manual deployment (2FA authentication):
 
 ```bash
-# Deploy from local machine (builds WASM, rsyncs, restarts services)
+# Deploy live notebooks to sciml.warwick.ac.uk
 ./scripts/deploy-warwick.sh
 ```
 
 The deploy script:
 1. Categorizes notebooks into WASM vs live
-2. Builds WASM notebooks to `_wasm_site/`
-3. Rsyncs WASM files to `/var/www/marimo-wasm/` on server
-4. Rsyncs live notebooks to `/home/svc_user/marimo-server/notebooks/`
-5. Restarts marimo service on server
+2. Syncs dependencies on server
+3. Deploys live notebooks to `~/marimo-server/notebooks/`
+4. Restarts marimo service on server
 
 ## Server Infrastructure
 
-**Target server:** sciml.warwick.ac.uk
+**Live server:** sciml.warwick.ac.uk
 
 ```
 /home/ubuntu/marimo-server/
-├── app.py           # FastAPI entry point (alternative to systemd)
-├── deploy.sh        # Deployment script (symlink to scripts/deploy.sh)
+├── app.py           # FastAPI entry point
+├── deploy.sh        # Server-side deployment script
 ├── notebooks/       # Live notebook .py files
 └── .venv/           # Python environment with marimo + deps
-
-/var/www/marimo-wasm/
-└── apps/            # WASM HTML files + assets
 ```
 
 **Services:**
-- nginx: SSL termination, basic auth, reverse proxy
-- systemd: `marimo-{notebook-name}.service` per live notebook
+- nginx: SSL termination, SSO auth, reverse proxy
+- systemd: marimo server process
 - Let's Encrypt: SSL certificates
 
-## Migration Checklist
+## GitHub Pages Configuration
 
-When migrating to a new server:
-
-1. **Server setup:**
-   - Install Python 3.12+, nginx, certbot
-   - Create marimo server directory
-   - Create Python venv with `uv`: `uv venv && uv pip install marimo jax jaxlib`
-   - Create `/var/www/marimo-wasm/` with correct permissions
-
-2. **SSL & Auth:**
-   - Run `certbot --nginx -d yourdomain.com`
-   - Create `/etc/nginx/.htpasswd` with `htpasswd -c /etc/nginx/.htpasswd username`
-
-3. **Deploy script:**
-   - Update `DOMAIN` variable in `scripts/deploy.sh`
-   - Update paths in `scripts/deploy-warwick.sh`
-   - Symlink or copy deploy.sh to server
-
-4. **DNS:**
-   - Point domain to new server IP
-
-5. **GitHub Pages redirects:**
-   - Update URLs in `404.html` and `index.html` if domain changes
+After initial setup, configure GitHub Pages in repo settings:
+1. Go to Settings → Pages
+2. Change Source from "Deploy from a branch" to "GitHub Actions"
 
 ## Marimo Notebook Conventions
 
