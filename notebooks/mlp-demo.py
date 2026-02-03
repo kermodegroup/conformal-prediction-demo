@@ -695,7 +695,7 @@ def _(
 
     # Combine all layers
     data_chart_spec = alt.layer(*layers).properties(
-        width=700, height=250, title='Data and Model Fit'
+        width='container', height=250, title='Data and Model Fit'
     ).configure_axis(
         grid=True, gridOpacity=0.3,
         labelFontSize=14, titleFontSize=16
@@ -825,7 +825,7 @@ def _(
         combined_chart = alt.layer(combined_chart, epoch_marker)
 
     combined_chart = combined_chart.properties(
-        width=700, height=200, title='Training Loss and Weight Norms'
+        width='container', height=200, title='Training Loss and Weight Norms'
     ).configure_axis(
         grid=True, gridOpacity=0.3,
         labelFontSize=14, titleFontSize=16
