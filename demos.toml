@@ -18,13 +18,25 @@ name = "kernel-demo"
 title = "Kernel Explorer"
 
 [[demos]]
+name = "bayesian-regression-demo"
+title = "Sequential Bayesian Linear Regression"
+
+[[demos]]
 name = "gp-demo"
 title = "GP Regression"
 
 [[demos]]
-name = "clustering-demo"
-title = "K-Means and GMM Clustering"
+name = "gp-derivative-demo"
+title = "GP with Derivative Observations"
 
 [[demos]]
 name = "mlp-demo"
 title = "MLP Regression"
+
+[[demos]]
+name = "neural-ode-demo"
+title = "Neural ODE Solver"
+
+[[demos]]
+name = "clustering-demo"
+title = "K-Means and GMM Clustering"

@@ -9,6 +9,10 @@ dependencies = [
     # Plotting
     "matplotlib==3.10.1",
     "seaborn==0.13.2",
+    "altair",
+    # Data
+    "pandas",
+    "pyarrow",
     # Numerics
     "numpy==2.2.5",
     "scipy",
