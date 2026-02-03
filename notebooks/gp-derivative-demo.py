@@ -308,9 +308,9 @@ def _(jax, jnp):
 
 @app.cell(hide_code=True)
 def _(np, pd):
-    # Static click grid for function plot (y range: -4 to 4)
-    _gx = np.linspace(-1.2, 1.2, 80)
-    _gy_f = np.linspace(-4, 4, 80)
+    # Static click grid for function plot (1:1 aspect ratio)
+    _gx = np.linspace(-2, 2, 80)
+    _gy_f = np.linspace(-2, 2, 80)
     click_grid_f_df = pd.DataFrame(
         [(x, y) for x in _gx for y in _gy_f],
         columns=['x', 'y']
@@ -363,9 +363,9 @@ def _(
     n_samples = n_samples_slider.value
     show_deriv = show_derivative_plot.value
 
-    # Fixed axis limits
-    x_min, x_max = -1.2, 1.2
-    y_min, y_max = -4, 4
+    # Fixed axis limits (1:1 aspect ratio for correct tangent visualization)
+    x_min, x_max = -2, 2
+    y_min, y_max = -2, 2
 
     # Get observations
     observations = get_observations() or []
@@ -549,19 +549,13 @@ def _(
             )
 
             # Build tangent data centered at posterior mean
-            # Adjust for aspect ratio so tangent VISUALLY shows correct slope
-            # Plot aspect: x_range=2.4, y_range=8, ratio=3.33
-            aspect_ratio = (y_max - y_min) / (x_max - x_min)
+            # With 1:1 aspect ratio, tangent lines display correctly
             tangent_f_data = []
             for i, (x, slope) in enumerate(deriv_obs):
                 y_center = float(f_at_deriv[i])
-                # Scale y-displacement by aspect ratio for visual correctness
-                y_disp = tangent_length * slope * aspect_ratio
-                # Clamp to keep tangent visible within plot bounds
-                y_disp = np.clip(y_disp, -2.0, 2.0)
                 tangent_f_data.append({
-                    'x1': x - tangent_length, 'y1': y_center - y_disp,
-                    'x2': x + tangent_length, 'y2': y_center + y_disp,
+                    'x1': x - tangent_length, 'y1': y_center - tangent_length * slope,
+                    'x2': x + tangent_length, 'y2': y_center + tangent_length * slope,
                 })
             tangent_f_df = pd.DataFrame(tangent_f_data)
 
