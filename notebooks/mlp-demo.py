@@ -50,9 +50,11 @@ def _(mo):
             flex: 1;
             min-width: 0;
             display: flex;
-            justify-content: center;
-            align-items: flex-start;
+            flex-direction: column;
+            justify-content: flex-start;
+            align-items: stretch;
             z-index: 1;
+            overflow: hidden;
         }
 
         .app-plot img,
@@ -950,11 +952,9 @@ def _(mo, header, data_chart_output, loss_chart_output, sidebar, param_info):
         mo.Html(f'''
         <div class="app-layout">
             <div class="app-plot">
-                <div style="display: flex; flex-direction: column; align-items: center; gap: 1em;">
-                    {mo.as_html(data_chart_output)}
-                    {mo.as_html(loss_chart_output)}
-                    {param_info}
-                </div>
+                {mo.as_html(data_chart_output)}
+                {mo.as_html(loss_chart_output)}
+                {param_info}
             </div>
             {sidebar}
         </div>
