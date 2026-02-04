@@ -175,11 +175,18 @@ def _(mo, qr_base64):
 
 @app.cell(hide_code=True)
 def _(mo):
+    # State for custom code
+    get_custom_code, set_custom_code = mo.state(
+        "# Define y = f(X) where X is a numpy array\n"
+        "# Available: np, math, X\n"
+        "y = np.sin(np.pi * X)"
+    )
+
     # Data controls
     n_points_slider = mo.ui.slider(10, 100, 5, 30, label='Training points $N$')
     noise_slider = mo.ui.slider(0.0, 0.5, 0.05, 0.1, label='Noise level $\\sigma$')
     function_dropdown = mo.ui.dropdown(
-        options={'Sine': 'sin', 'Step': 'step', 'Runge': 'runge', 'Witch of Agnesi': 'witch'},
+        options={'Sine': 'sin', 'Step': 'step', 'Runge': 'runge', 'Witch of Agnesi': 'witch', 'Custom': 'custom'},
         value='Sine',
         label='Target function'
     )
@@ -216,6 +223,21 @@ def _(mo):
     store_button = mo.ui.run_button(label='Store Fit')
     clear_stored_button = mo.ui.run_button(label='Clear Stored')
 
+    # Custom function code editor and accordion
+    custom_code_editor = mo.ui.code_editor(
+        value=get_custom_code(),
+        language="python",
+        min_height=120,
+        on_change=set_custom_code,
+    )
+
+    custom_function_accordion = mo.accordion({
+        "Custom Function Code": mo.vstack([
+            mo.md("Define `y = f(X)`. Available: `np`, `math`, `X` (numpy array)."),
+            custom_code_editor,
+        ])
+    }, lazy=True)
+
     return (
         n_points_slider,
         noise_slider,
@@ -234,33 +256,17 @@ def _(mo):
         reset_button,
         store_button,
         clear_stored_button,
+        get_custom_code,
+        set_custom_code,
+        custom_code_editor,
+        custom_function_accordion,
     )
 
 
 @app.cell(hide_code=True)
 def _(np):
-    def generate_data(n_points, noise_std, function_type, seed):
-        """Generate training data from target function with noise."""
-        rng = np.random.default_rng(seed)
-        X = rng.uniform(-2, 2, n_points)
-        X = np.sort(X)
-
-        if function_type == 'sin':
-            y_true = np.sin(np.pi * X)
-        elif function_type == 'step':
-            y_true = np.where(X < 0, -0.5, 0.5)
-        elif function_type == 'runge':
-            y_true = 1.0 / (1.0 + 25.0 * X**2)
-        elif function_type == 'witch':
-            y_true = 1.0 / (1.0 + X**2)
-        else:
-            y_true = np.sin(np.pi * X)
-
-        y = y_true + rng.normal(0, noise_std, n_points)
-        return X, y, y_true
-
-    def get_ground_truth(X, function_type):
-        """Get ground truth values for plotting."""
+    def _eval_function(X, function_type, custom_code=None):
+        """Evaluate target function."""
         if function_type == 'sin':
             return np.sin(np.pi * X)
         elif function_type == 'step':
@@ -269,8 +275,39 @@ def _(np):
             return 1.0 / (1.0 + 25.0 * X**2)
         elif function_type == 'witch':
             return 1.0 / (1.0 + X**2)
-        else:
-            return np.sin(np.pi * X)
+        elif function_type == 'custom' and custom_code:
+            import math
+            safe_builtins = {
+                'range': range, 'len': len, 'sum': sum, 'min': min, 'max': max,
+                'abs': abs, 'round': round, 'int': int, 'float': float,
+                'True': True, 'False': False, 'None': None,
+            }
+            try:
+                namespace = {'np': np, 'math': math, 'X': X}
+                exec(custom_code, {"__builtins__": safe_builtins}, namespace)
+                if 'y' not in namespace:
+                    raise ValueError("Code must define 'y'")
+                y = np.atleast_1d(np.asarray(namespace['y'], dtype=float))
+                if y.shape != X.shape:
+                    y = np.broadcast_to(y, X.shape).copy()
+                return y
+            except Exception:
+                return np.full_like(X, np.nan, dtype=float)
+        return np.sin(np.pi * X)
+
+    def generate_data(n_points, noise_std, function_type, seed, custom_code=None):
+        """Generate training data from target function with noise."""
+        rng = np.random.default_rng(seed)
+        X = rng.uniform(-2, 2, n_points)
+        X = np.sort(X)
+
+        y_true = _eval_function(X, function_type, custom_code)
+        y = y_true + rng.normal(0, noise_std, n_points)
+        return X, y, y_true
+
+    def get_ground_truth(X, function_type, custom_code=None):
+        """Get ground truth values for plotting."""
+        return _eval_function(X, function_type, custom_code)
 
     return generate_data, get_ground_truth
 
@@ -404,13 +441,18 @@ def _(
     get_train_params, set_train_params, get_last_pred, set_last_pred,
     get_snapshots, set_snapshots,
     get_stored_fits, set_stored_fits,
+    get_custom_code,
 ):
+    # Get custom code if using custom function
+    custom_code = get_custom_code() if function_dropdown.value == 'custom' else None
+
     # Generate training data
     X_full, y_full, _ = generate_data(
         n_points_slider.value,
         noise_slider.value,
         function_dropdown.value,
-        seed_slider.value
+        seed_slider.value,
+        custom_code
     )
 
     # Filter to training range
@@ -437,6 +479,7 @@ def _(
         'n_points': n_points_slider.value,
         'noise': noise_slider.value,
         'function': function_dropdown.value,
+        'custom_code': custom_code,
         'seed': seed_slider.value,
         'width': width,
         'depth': depth,
@@ -553,10 +596,12 @@ def _(
     get_ground_truth, get_model, get_losses, get_trained,
     get_train_params, get_last_pred, get_stored_fits,
     get_snapshots, get_selected_epoch,
+    get_custom_code,
 ):
     # Prepare data for Altair plots
     X_plot = np.linspace(-2, 2, 200)
-    y_gt = get_ground_truth(X_plot, function_dropdown.value)
+    custom_code = get_custom_code() if function_dropdown.value == 'custom' else None
+    y_gt = get_ground_truth(X_plot, function_dropdown.value, custom_code)
 
     # Ground truth DataFrame
     gt_df = pd.DataFrame({'x': X_plot, 'y': y_gt, 'type': 'Ground truth'})
@@ -872,6 +917,7 @@ def _(
     width_slider, depth_slider, activation_dropdown,
     lr_slider, optimizer_dropdown, epochs_slider, l1_slider, l2_slider, train_range_slider,
     train_button, reset_button, store_button, clear_stored_button,
+    custom_function_accordion,
 ):
     sidebar = mo.Html(f'''
     <div class="app-sidebar">
@@ -879,6 +925,7 @@ def _(
         {n_points_slider}
         {noise_slider}
         {function_dropdown}
+        {custom_function_accordion}
         {seed_slider}
         {train_range_slider}
 

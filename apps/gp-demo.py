@@ -120,8 +120,9 @@ def _():
     import altair as alt
     import scipy.linalg as sla
     import scipy.optimize as opt
+    from scipy.stats import norm
 
-    return alt, mo, np, opt, pd, sla
+    return alt, mo, np, norm, opt, pd, sla
 
 
 @app.cell(hide_code=True)
@@ -168,6 +169,13 @@ def _(mo, qr_base64):
 
 @app.cell(hide_code=True)
 def _(mo):
+    # State for custom code
+    get_custom_code, set_custom_code = mo.state(
+        "# Define y = f(x) where x is a numpy array\n"
+        "# Available: np, math, x\n"
+        "y = np.sin(2 * np.pi * x) + 0.5"
+    )
+
     # Target function selection
     target_dropdown = mo.ui.dropdown(
         options={
@@ -175,6 +183,7 @@ def _(mo):
             'Step': 'step',
             'Runge': 'runge',
             'Witch of Agnesi': 'witch',
+            'Custom': 'custom',
         },
         value='Sine',
         label='Target Function'
@@ -206,6 +215,21 @@ def _(mo):
     # Sampling controls
     n_samples_slider = mo.ui.slider(0, 30, 1, 5, label='$N$ samples')
 
+    # Custom function code editor and accordion
+    custom_code_editor = mo.ui.code_editor(
+        value=get_custom_code(),
+        language="python",
+        min_height=120,
+        on_change=set_custom_code,
+    )
+
+    custom_function_accordion = mo.accordion({
+        "Custom Function Code": mo.vstack([
+            mo.md("Define `y = f(x)`. Available: `np`, `math`, `x` (numpy array)."),
+            custom_code_editor,
+        ])
+    }, lazy=True)
+
     return (
         target_dropdown,
         kernel_dropdown,
@@ -216,6 +240,10 @@ def _(mo):
         seed_slider,
         click_uncertainty_slider,
         n_samples_slider,
+        get_custom_code,
+        set_custom_code,
+        custom_code_editor,
+        custom_function_accordion,
     )
 
 
@@ -237,7 +265,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(np):
-    def target_function(x, func_type):
+    def target_function(x, func_type, custom_code=None):
         """Generate target function values."""
         if func_type == 'sin':
             return 0.5 + np.sin(2 * np.pi * x)
@@ -247,6 +275,24 @@ def _(np):
             return 1.0 / (1.0 + 25.0 * x**2)
         elif func_type == 'witch':
             return 1.0 / (1.0 + x**2)
+        elif func_type == 'custom' and custom_code:
+            import math
+            safe_builtins = {
+                'range': range, 'len': len, 'sum': sum, 'min': min, 'max': max,
+                'abs': abs, 'round': round, 'int': int, 'float': float,
+                'True': True, 'False': False, 'None': None,
+            }
+            try:
+                namespace = {'np': np, 'math': math, 'x': x}
+                exec(custom_code, {"__builtins__": safe_builtins}, namespace)
+                if 'y' not in namespace:
+                    raise ValueError("Code must define 'y'")
+                y = np.atleast_1d(np.asarray(namespace['y'], dtype=float))
+                if y.shape != x.shape:
+                    y = np.broadcast_to(y, x.shape).copy()
+                return y
+            except Exception:
+                return np.full_like(x, np.nan, dtype=float)
         return np.sin(x)
 
     def rbf_kernel(X1, X2, variance, lengthscale):
@@ -357,6 +403,7 @@ def _(
     n_data_slider, noise_slider, seed_slider,
     get_clicked_points, set_clicked_points,
     get_opt_params, set_opt_params, get_opt_error, set_opt_error,
+    get_custom_code,
 ):
     def run_optimization(_):
         """Optimize hyperparameters to maximize marginal likelihood."""
@@ -368,12 +415,13 @@ def _(
             sigma_n = noise_slider.value
             seed = seed_slider.value
             clicked = get_clicked_points() or []
+            custom_code = get_custom_code() if func_type == 'custom' else None
 
             # Combine slider-generated and clicked data
             if n_data > 0:
                 np.random.seed(seed)
                 X_slider = np.sort(np.random.uniform(-1, 1, n_data))
-                y_slider = target_function(X_slider, func_type) + np.random.normal(0, sigma_n, n_data)
+                y_slider = target_function(X_slider, func_type, custom_code) + np.random.normal(0, sigma_n, n_data)
             else:
                 X_slider = np.array([])
                 y_slider = np.array([])
@@ -436,13 +484,14 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
-    alt, np, pd, mo,
+    alt, np, pd, mo, norm,
     target_function, get_kernel_func, gp_posterior_hetero,
     target_dropdown, kernel_dropdown, variance_slider, lengthscale_slider,
     n_data_slider, noise_slider, seed_slider, n_samples_slider,
     click_uncertainty_slider,
     get_clicked_points, get_opt_params,
     click_grid_df,
+    get_custom_code,
 ):
     # Get parameter values
     func_type = target_dropdown.value
@@ -451,6 +500,7 @@ def _(
     seed = seed_slider.value
     n_samples = n_samples_slider.value
     click_uncertainty = click_uncertainty_slider.value
+    custom_code = get_custom_code() if func_type == 'custom' else None
 
     # Use optimized params if available, otherwise use sliders
     opt_params = get_opt_params()
@@ -472,7 +522,7 @@ def _(
     np.random.seed(seed)
     if n_data > 0:
         X_slider = np.sort(np.random.uniform(-1, 1, n_data))
-        y_true_slider = target_function(X_slider, func_type)
+        y_true_slider = target_function(X_slider, func_type, custom_code)
         data_noise = noise_slider.value
         y_slider = y_true_slider + np.random.normal(0, data_noise, n_data)
         errors_slider = np.full(n_data, data_noise)  # Homoscedastic
@@ -521,7 +571,7 @@ def _(
 
     # Test points for plotting
     X_test = np.linspace(x_min, x_max, 200)
-    y_true_test = target_function(X_test, func_type)
+    y_true_test = target_function(X_test, func_type, custom_code)
 
     # Compute GP posterior (heteroscedastic if we have any data)
     if total_points > 0:
@@ -536,6 +586,33 @@ def _(
 
     f_std = np.sqrt(np.diag(f_cov))
     f_std_tot = np.sqrt(np.diag(f_cov) + mean_noise**2)
+
+    # --- Compute metrics ---
+    # Test metrics: compare GP predictions to ground truth on test grid
+    z_test = (y_true_test - f_mean) / f_std_tot
+    rmse_test = np.sqrt(np.mean((f_mean - y_true_test)**2))
+    mae_test = np.mean(np.abs(f_mean - y_true_test))
+    # CRPS for Gaussian: σ * [z*(2*Φ(z) - 1) + 2*φ(z) - 1/√π]
+    crps_test = np.mean(f_std_tot * (z_test * (2 * norm.cdf(z_test) - 1) + 2 * norm.pdf(z_test) - 1 / np.sqrt(np.pi)))
+    # Log likelihood: log p(y | μ, σ)
+    ll_test = np.mean(-0.5 * np.log(2 * np.pi) - np.log(f_std_tot) - 0.5 * z_test**2)
+
+    # Training metrics: compare GP predictions at training locations to observed values
+    if total_points > 0:
+        # Compute GP prediction at training points (leave-one-out would be better but this is simpler)
+        f_mean_train, f_cov_train = gp_posterior_hetero(X_train, y_train, errors_train, X_train, kernel_func, variance, lengthscale)
+        f_std_train = np.sqrt(np.diag(f_cov_train) + np.mean(errors_train)**2)
+
+        z_train = (y_train - f_mean_train) / f_std_train
+        rmse_train = np.sqrt(np.mean((f_mean_train - y_train)**2))
+        mae_train = np.mean(np.abs(f_mean_train - y_train))
+        crps_train = np.mean(f_std_train * (z_train * (2 * norm.cdf(z_train) - 1) + 2 * norm.pdf(z_train) - 1 / np.sqrt(np.pi)))
+        ll_train = np.mean(-0.5 * np.log(2 * np.pi) - np.log(f_std_train) - 0.5 * z_train**2)
+    else:
+        rmse_train = np.nan
+        mae_train = np.nan
+        crps_train = np.nan
+        ll_train = np.nan
 
     # Generate samples from posterior
     samples_data = []
@@ -589,14 +666,6 @@ def _(
     # Samples
     samples_df = pd.DataFrame(samples_data) if samples_data else pd.DataFrame(columns=['x', 'y', 'sample'])
 
-    # Brush size indicator - shows current click uncertainty as a vertical bar in corner
-    brush_indicator_df = pd.DataFrame({
-        'x': [x_max - 0.15],
-        'y': [y_max - 0.5],
-        'y_lower': [y_max - 0.5 - click_uncertainty],
-        'y_upper': [y_max - 0.5 + click_uncertainty],
-    })
-
     # Define scales
     x_scale = alt.Scale(domain=[x_min, x_max])
     y_scale = alt.Scale(domain=[y_min, y_max])
@@ -611,7 +680,7 @@ def _(
     ).encode(
         x=alt.X('x:Q', scale=x_scale, title='x'),
         y=alt.Y('y_lower_tot:Q', scale=y_scale, title='f(x)'),
-        y2='y_upper_tot:Q'
+        y2='y_upper_tot:Q',
     )
 
     # Epistemic uncertainty band (inner, darker)
@@ -620,23 +689,23 @@ def _(
     ).encode(
         x=alt.X('x:Q', scale=x_scale),
         y=alt.Y('y_lower_ep:Q', scale=y_scale),
-        y2='y_upper_ep:Q'
+        y2='y_upper_ep:Q',
     )
 
-    # Posterior mean line
-    mean_line = alt.Chart(mean_df).mark_line(
-        color='#1f77b4', strokeWidth=3
-    ).encode(
-        x=alt.X('x:Q', scale=x_scale),
-        y=alt.Y('y:Q', scale=y_scale)
-    )
-
-    # Ground truth line
+    # Ground truth line (dashed)
     gt_line = alt.Chart(gt_df).mark_line(
         color='black', strokeWidth=3, strokeDash=[5, 5], opacity=0.7
     ).encode(
         x=alt.X('x:Q', scale=x_scale),
-        y=alt.Y('y:Q', scale=y_scale)
+        y=alt.Y('y:Q', scale=y_scale),
+    )
+
+    # Posterior mean line (solid)
+    mean_line = alt.Chart(mean_df).mark_line(
+        color='#1f77b4', strokeWidth=3
+    ).encode(
+        x=alt.X('x:Q', scale=x_scale),
+        y=alt.Y('y:Q', scale=y_scale),
     )
 
     # Build layers list
@@ -658,60 +727,146 @@ def _(
 
     # Slider-generated data points (blue) with error bars
     if len(slider_data_df) > 0:
-        # Error bars
         slider_errorbars = alt.Chart(slider_data_df).mark_rule(
             color='#1f77b4', strokeWidth=2, opacity=0.6
         ).encode(
             x=alt.X('x:Q', scale=x_scale),
             y=alt.Y('y_lower:Q', scale=y_scale),
-            y2='y_upper:Q'
+            y2='y_upper:Q',
         )
-        # Points
         slider_points = alt.Chart(slider_data_df).mark_circle(
             color='#1f77b4', size=120, opacity=0.8
         ).encode(
             x=alt.X('x:Q', scale=x_scale),
-            y=alt.Y('y:Q', scale=y_scale)
+            y=alt.Y('y:Q', scale=y_scale),
         )
         layers.append(slider_errorbars)
         layers.append(slider_points)
 
     # Clicked data points (red) with error bars
     if len(clicked_data_df) > 0:
-        # Error bars
         clicked_errorbars = alt.Chart(clicked_data_df).mark_rule(
             color='#d62728', strokeWidth=3, opacity=0.8
         ).encode(
             x=alt.X('x:Q', scale=x_scale),
             y=alt.Y('y_lower:Q', scale=y_scale),
-            y2='y_upper:Q'
+            y2='y_upper:Q',
         )
-        # Points
         clicked_points_layer = alt.Chart(clicked_data_df).mark_circle(
             color='#d62728', size=150, opacity=0.9
         ).encode(
             x=alt.X('x:Q', scale=x_scale),
-            y=alt.Y('y:Q', scale=y_scale)
+            y=alt.Y('y:Q', scale=y_scale),
         )
         layers.append(clicked_errorbars)
         layers.append(clicked_points_layer)
 
-    # Brush size indicator in top-right corner
-    brush_indicator_bar = alt.Chart(brush_indicator_df).mark_rule(
-        color='#d62728', strokeWidth=4, opacity=0.7
-    ).encode(
-        x=alt.X('x:Q', scale=x_scale),
-        y=alt.Y('y_lower:Q', scale=y_scale),
-        y2='y_upper:Q'
+    # Create manual 2-column legend
+    clicked_legend_label = 'Clicked'
+
+    # 2-column layout: [col, row] positions
+    legend_data = pd.DataFrame({
+        'label': ['Ground Truth', 'Posterior Mean', 'Epistemic ±2σ', 'Total ±2σ', 'Random Data', clicked_legend_label],
+        'type': ['line', 'line', 'area', 'area', 'point', 'point'],
+        'color': ['black', '#1f77b4', '#1f77b4', '#ff7f0e', '#1f77b4', '#d62728'],
+        'dash': ['dashed', 'solid', 'solid', 'solid', 'solid', 'solid'],
+        'col': [0, 1, 0, 1, 0, 1],  # Column 0 or 1
+        'row': [0, 0, 1, 1, 2, 2],  # Row 0, 1, or 2
+    })
+
+    # Legend positioning
+    legend_right = x_max - 0.03
+    legend_top = y_max - 0.25
+    row_spacing = 0.55
+    col_width = 0.58
+    col1_symbol_x = legend_right - 2 * col_width + 0.05
+    col2_symbol_x = legend_right - col_width + 0.05
+
+    legend_items_df = legend_data.copy()
+    legend_items_df['x'] = legend_items_df['col'].apply(lambda c: col1_symbol_x if c == 0 else col2_symbol_x)
+    legend_items_df['y'] = legend_items_df['row'].apply(lambda r: legend_top - r * row_spacing)
+    legend_items_df['x_text'] = legend_items_df['x'] + 0.12
+
+    n_rows = 3
+    # Legend background
+    legend_bg = alt.Chart(pd.DataFrame({
+        'x': [col1_symbol_x - 0.1], 'x2': [legend_right],
+        'y': [legend_top + 0.32], 'y2': [legend_top - (n_rows - 1) * row_spacing - 0.32]
+    })).mark_rect(fill='white', stroke='#ccc', strokeWidth=1, cornerRadius=4, opacity=0.95).encode(
+        x=alt.X('x:Q', scale=x_scale), x2='x2:Q',
+        y=alt.Y('y:Q', scale=y_scale), y2='y2:Q'
     )
-    brush_indicator_point = alt.Chart(brush_indicator_df).mark_circle(
-        color='#d62728', size=100, opacity=0.7
-    ).encode(
-        x=alt.X('x:Q', scale=x_scale),
-        y=alt.Y('y:Q', scale=y_scale)
+    layers.append(legend_bg)
+
+    # Legend lines (for line items)
+    line_legend_df = legend_items_df[legend_items_df['type'] == 'line'].copy()
+    for _, row in line_legend_df.iterrows():
+        dash_pattern = [5, 5] if row['dash'] == 'dashed' else []
+        line_seg = alt.Chart(pd.DataFrame({
+            'x': [row['x'] - 0.06, row['x'] + 0.06],
+            'y': [row['y'], row['y']]
+        })).mark_line(
+            color=row['color'], strokeWidth=2.5, strokeDash=dash_pattern,
+            opacity=0.8 if row['dash'] == 'dashed' else 1.0
+        ).encode(x=alt.X('x:Q', scale=x_scale), y=alt.Y('y:Q', scale=y_scale))
+        layers.append(line_seg)
+
+    # Legend squares (for area items)
+    area_legend_df = legend_items_df[legend_items_df['type'] == 'area'].copy()
+    for _, row in area_legend_df.iterrows():
+        opacity = 0.5 if row['label'] == 'Epistemic ±2σ' else 0.3
+        area_sym = alt.Chart(pd.DataFrame({
+            'x': [row['x'] - 0.045], 'x2': [row['x'] + 0.045],
+            'y': [row['y'] - 0.16], 'y2': [row['y'] + 0.16]
+        })).mark_rect(fill=row['color'], opacity=opacity, stroke=row['color'], strokeWidth=1).encode(
+            x=alt.X('x:Q', scale=x_scale), x2='x2:Q',
+            y=alt.Y('y:Q', scale=y_scale), y2='y2:Q'
+        )
+        layers.append(area_sym)
+
+    # Legend circles with error bars (for point items)
+    point_legend_df = legend_items_df[legend_items_df['type'] == 'point'].copy()
+    # Add error bar sizes: Random Data uses noise slider, Clicked uses click_uncertainty
+    data_noise = noise_slider.value
+    point_legend_df = point_legend_df.copy()
+    point_legend_df['error'] = point_legend_df['label'].apply(
+        lambda lbl: data_noise if lbl == 'Random Data' else click_uncertainty
     )
-    layers.append(brush_indicator_bar)
-    layers.append(brush_indicator_point)
+    # Scale error bars for legend display (map data units to reasonable legend size)
+    error_scale = 0.6  # Scale factor for visibility in legend
+    point_legend_df['y_lower'] = point_legend_df['y'] - point_legend_df['error'] * error_scale
+    point_legend_df['y_upper'] = point_legend_df['y'] + point_legend_df['error'] * error_scale
+
+    # Error bars
+    for _, row in point_legend_df.iterrows():
+        errbar = alt.Chart(pd.DataFrame({
+            'x': [row['x']],
+            'y_lower': [row['y_lower']],
+            'y_upper': [row['y_upper']]
+        })).mark_rule(color=row['color'], strokeWidth=2, opacity=0.7).encode(
+            x=alt.X('x:Q', scale=x_scale),
+            y=alt.Y('y_lower:Q', scale=y_scale),
+            y2='y_upper:Q'
+        )
+        layers.append(errbar)
+
+    # Points on top of error bars
+    point_sym = alt.Chart(point_legend_df).mark_circle(size=50, opacity=0.9).encode(
+        x=alt.X('x:Q', scale=x_scale),
+        y=alt.Y('y:Q', scale=y_scale),
+        color=alt.Color('color:N', scale=None, legend=None)
+    )
+    layers.append(point_sym)
+
+    # Legend text labels
+    legend_text = alt.Chart(legend_items_df).mark_text(
+        align='left', fontSize=9, font='sans-serif'
+    ).encode(
+        x=alt.X('x_text:Q', scale=x_scale),
+        y=alt.Y('y:Q', scale=y_scale),
+        text='label:N'
+    )
+    layers.append(legend_text)
 
     # Invisible click layer (must be on top for interaction)
     click_layer = alt.Chart(click_grid_df).mark_point(
@@ -731,6 +886,9 @@ def _(
         labelFontSize=14, titleFontSize=16
     ).configure_title(
         fontSize=18
+    ).configure_legend(
+        labelFontSize=12,
+        symbolSize=100
     )
 
     interactive_chart = mo.ui.altair_chart(chart)
@@ -739,7 +897,15 @@ def _(
     n_slider_points = len(X_slider)
     n_clicked_points = len(X_clicked)
 
-    return interactive_chart, total_points, n_slider_points, n_clicked_points, click_uncertainty
+    # Bundle metrics for table
+    metrics = {
+        'rmse_train': rmse_train, 'rmse_test': rmse_test,
+        'mae_train': mae_train, 'mae_test': mae_test,
+        'crps_train': crps_train, 'crps_test': crps_test,
+        'll_train': ll_train, 'll_test': ll_test,
+    }
+
+    return interactive_chart, total_points, n_slider_points, n_clicked_points, click_uncertainty, metrics
 
 
 @app.cell(hide_code=True)
@@ -747,6 +913,49 @@ def _(interactive_chart):
     # Pass-through display cell
     chart_display = interactive_chart
     return (chart_display,)
+
+
+@app.cell(hide_code=True)
+def _(mo, np, metrics):
+    # Format metric value
+    def fmt(v):
+        return '—' if np.isnan(v) else f'{v:.4f}'
+
+    # Metrics table
+    metrics_table = mo.Html(f'''
+    <table style="width: 100%; border-collapse: collapse; font-size: 13px; max-width: 400px; margin: 0 auto;">
+        <thead>
+            <tr style="border-bottom: 2px solid #dee2e6;">
+                <th style="text-align: left; padding: 6px 8px;">Metric</th>
+                <th style="text-align: right; padding: 6px 8px;">Train</th>
+                <th style="text-align: right; padding: 6px 8px;">Test</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr style="border-bottom: 1px solid #dee2e6;">
+                <td style="padding: 6px 8px;">RMSE</td>
+                <td style="text-align: right; padding: 6px 8px; font-family: monospace;">{fmt(metrics['rmse_train'])}</td>
+                <td style="text-align: right; padding: 6px 8px; font-family: monospace;">{fmt(metrics['rmse_test'])}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #dee2e6;">
+                <td style="padding: 6px 8px;">MAE</td>
+                <td style="text-align: right; padding: 6px 8px; font-family: monospace;">{fmt(metrics['mae_train'])}</td>
+                <td style="text-align: right; padding: 6px 8px; font-family: monospace;">{fmt(metrics['mae_test'])}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #dee2e6;">
+                <td style="padding: 6px 8px;">CRPS</td>
+                <td style="text-align: right; padding: 6px 8px; font-family: monospace;">{fmt(metrics['crps_train'])}</td>
+                <td style="text-align: right; padding: 6px 8px; font-family: monospace;">{fmt(metrics['crps_test'])}</td>
+            </tr>
+            <tr>
+                <td style="padding: 6px 8px;">Log Lik.</td>
+                <td style="text-align: right; padding: 6px 8px; font-family: monospace;">{fmt(metrics['ll_train'])}</td>
+                <td style="text-align: right; padding: 6px 8px; font-family: monospace;">{fmt(metrics['ll_test'])}</td>
+            </tr>
+        </tbody>
+    </table>
+    ''')
+    return (metrics_table,)
 
 
 @app.cell(hide_code=True)
@@ -780,11 +989,13 @@ def _(
     optimize_button, reset_opt_button, clear_points_button,
     get_clicked_points, get_opt_params, get_opt_error,
     n_slider_points, n_clicked_points,
+    custom_function_accordion,
 ):
     # Function section
     func_section = mo.vstack([
         mo.Html("<h4>Function</h4>"),
         target_dropdown,
+        custom_function_accordion,
     ], gap="0.3em")
 
     # Kernel section with optimization
@@ -841,12 +1052,17 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo, header, chart_display, sidebar_html):
+def _(mo, header, chart_display, sidebar_html, metrics_table):
     # Combined layout: header on top, plot on left, controls on right
     mo.Html(f'''
     {header}
     <div class="app-layout">
-        <div class="app-plot">{mo.as_html(chart_display)}</div>
+        <div class="app-plot">
+            {mo.as_html(chart_display)}
+            <div style="margin-top: 1em;">
+                {mo.as_html(metrics_table)}
+            </div>
+        </div>
         <div class="app-sidebar-container">
             {sidebar_html}
         </div>
