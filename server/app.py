@@ -2,7 +2,7 @@ import marimo
 import tomllib
 from pathlib import Path
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 NOTEBOOKS_DIR = Path(__file__).parent / "notebooks"
@@ -72,9 +72,9 @@ def index():
         if name not in config_by_name or not config_by_name[name].get("hidden", False):
             all_notebooks.append((name, f"/live/{name}/", "live"))
 
-    # Add WASM notebooks (link to GitHub Pages)
+    # Add WASM notebooks (redirect via /wasm/ to GitHub Pages)
     for name in wasm_notebooks:
-        all_notebooks.append((name, f"{GITHUB_PAGES_BASE}/{name}.html", "wasm"))
+        all_notebooks.append((name, f"/wasm/{name}/", "wasm"))
 
     # Sort by config order, then alphabetically
     all_notebooks.sort(key=lambda x: get_sort_key(x[0]))
@@ -119,6 +119,17 @@ def index():
     </body>
     </html>
     """
+
+
+# Redirect /wasm/{name} to GitHub Pages
+@app.get("/wasm/{name}/")
+@app.get("/wasm/{name}")
+def wasm_redirect(name: str):
+    """Redirect WASM notebook requests to GitHub Pages."""
+    return RedirectResponse(
+        url=f"{GITHUB_PAGES_BASE}/{name}.html",
+        status_code=302
+    )
 
 
 # Mount marimo server at /live (SSO protected path)
